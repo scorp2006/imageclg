@@ -6,6 +6,7 @@ import base64
 import json
 import os
 from google import genai
+from google.genai import types as gtypes
 
 app = FastAPI()
 
@@ -46,34 +47,25 @@ class QARequest(BaseModel):
 @app.post("/answer-image")
 def answer_image(req: QARequest):
     try:
+        img_bytes = base64.b64decode(req.image_base64)
         prompt = (
-            f"Look at the image and answer this question: {req.question}\n"
-            "Rules:\n"
-            "- Return ONLY the answer value as a string.\n"
-            "- No units, no currency symbols, no extra text.\n"
-            "- For numbers, return just the number (e.g. '4089.35').\n"
-            "- No explanation."
+            f"Carefully analyze the image and answer this question: {req.question}\n\n"
+            "Response rules:\n"
+            "- Read all text, numbers, and labels visible in the image.\n"
+            "- If the image contains a table, chart, receipt, or invoice, extract exact numeric values.\n"
+            "- For numeric answers (sums, totals, maximums, averages): return ONLY the number as a plain string, no currency symbols, no units, no commas (e.g. '4089.35' not '$4,089.35').\n"
+            "- For categorical answers (e.g. 'which category is largest'): return just the category name as a string.\n"
+            "- No explanation, no reasoning, no punctuation at the end.\n"
+            "- Return exactly what would go in the JSON 'answer' field."
         )
-        interaction = client.interactions.create(
+        response = client.models.generate_content(
             model=MODEL_NAME,
-            input=[
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "input_text", "text": prompt},
-                        {
-                            "type": "input_image",
-                            "source": {
-                                "type": "base64",
-                                "media_type": "image/png",
-                                "data": req.image_base64,
-                            },
-                        },
-                    ],
-                }
+            contents=[
+                prompt,
+                gtypes.Part.from_bytes(data=img_bytes, mime_type="image/png"),
             ],
         )
-        return {"answer": interaction.output_text.strip()}
+        return {"answer": response.text.strip()}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
