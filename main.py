@@ -323,7 +323,7 @@ class SemanticSearchRequest(BaseModel):
 
 def embed_texts(texts):
     result = client.models.embed_content(
-        model="text-embedding-004",
+        model="gemini-embedding-001",
         contents=texts,
     )
     return [e.values for e in result.embeddings]
