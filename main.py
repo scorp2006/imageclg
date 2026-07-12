@@ -39,8 +39,20 @@ def answer_image(req: QARequest):
         interaction = client.interactions.create(
             model=MODEL_NAME,
             input=[
-                {"type": "text", "text": prompt},
-                {"type": "image", "image": {"data": req.image_base64, "mime_type": "image/png"}},
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "input_text", "text": prompt},
+                        {
+                            "type": "input_image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": "image/png",
+                                "data": req.image_base64,
+                            },
+                        },
+                    ],
+                }
             ],
         )
         return {"answer": interaction.output_text.strip()}
