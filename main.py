@@ -251,7 +251,7 @@ INVOICE_INTEL_PROMPT = """You are an invoice extraction engine. Extract these fi
 - is_paid: boolean ("paid in full" -> true, "awaiting payment" -> false)
 - priority: one of low, normal, high, urgent (string)
 - contact_email: lowercased (string)
-- line_items: array of {sku, quantity, unit_price} in order they appear; unit_price is integer
+- line_items: array of objects each with keys sku, quantity, unit_price, in order they appear; unit_price is integer
 - item_count: integer number of line items
 
 Return ONLY the JSON object, no markdown, no code fences, no explanation.
@@ -264,47 +264,52 @@ Invoice text:
 JSON:"""
 
 
+def to_int_safe(v):
+    if v is None:
+        return None
+    if isinstance(v, bool):
+        return int(v)
+    if isinstance(v, (int, float)):
+        return int(v)
+    if isinstance(v, str):
+        try:
+            return int(float(v.replace(",", "").replace("$", "").strip()))
+        except Exception:
+            return None
+    return None
+
+
 @app.post("/invoice-intelligence")
 def invoice_intelligence(req: InvoiceIntelRequest):
     try:
         prompt = INVOICE_INTEL_PROMPT.format(text=req.text)
         interaction = client.interactions.create(model=MODEL_NAME, input=prompt)
         parsed = extract_json(interaction.output_text)
-        # Coerce types
-        def to_int(v):
-            if v is None:
-                return None
-            if isinstance(v, bool):
-                return int(v)
-            if isinstance(v, (int, float)):
-                return int(v)
-            if isinstance(v, str):
-                try:
-                    return int(float(v.replace(",", "").strip()))
-                except Exception:
-                    return None
-            return None
+        if not isinstance(parsed, dict):
+            parsed = {}
+
         result = {
             "vendor": parsed.get("vendor"),
             "currency": parsed.get("currency"),
-            "total_amount": to_int(parsed.get("total_amount")),
+            "total_amount": to_int_safe(parsed.get("total_amount")),
             "invoice_date": parsed.get("invoice_date"),
-            "due_in_days": to_int(parsed.get("due_in_days")),
+            "due_in_days": to_int_safe(parsed.get("due_in_days")),
             "is_paid": bool(parsed.get("is_paid")) if parsed.get("is_paid") is not None else None,
             "priority": parsed.get("priority"),
             "contact_email": (parsed.get("contact_email") or "").lower() if parsed.get("contact_email") else None,
             "line_items": [],
             "item_count": 0,
         }
-        items = parsed.get("line_items") or []
+
         clean_items = []
+        items = parsed.get("line_items")
         if isinstance(items, list):
             for it in items:
                 if isinstance(it, dict):
                     clean_items.append({
                         "sku": it.get("sku"),
-                        "quantity": to_int(it.get("quantity")),
-                        "unit_price": to_int(it.get("unit_price")),
+                        "quantity": to_int_safe(it.get("quantity")),
+                        "unit_price": to_int_safe(it.get("unit_price")),
                     })
         result["line_items"] = clean_items
         result["item_count"] = len(clean_items)
