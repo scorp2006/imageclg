@@ -17,7 +17,7 @@ app.add_middleware(
 )
 
 client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
-MODEL_NAME = "gemini-2.5-flash"
+MODEL_NAME = "gemini-2.0-flash"
 
 # ----------------- Image QA -----------------
 
