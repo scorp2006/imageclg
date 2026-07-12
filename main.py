@@ -3,7 +3,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import base64
 import os
-import google.generativeai as genai
+from google import genai
+from google.genai import types
 
 app = FastAPI()
 
@@ -14,8 +15,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-genai.configure(api_key=os.environ["GEMINI_API_KEY"])
-model = genai.GenerativeModel("gemini-2.0-flash-exp")
+client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
+MODEL_NAME = "gemini-3.5-flash"
 
 
 class QARequest(BaseModel):
@@ -35,10 +36,13 @@ def answer_image(req: QARequest):
             "- For numbers, return just the number (e.g. '4089.35').\n"
             "- No explanation."
         )
-        response = model.generate_content([
-            prompt,
-            {"mime_type": "image/png", "data": img_bytes}
-        ])
+        response = client.models.generate_content(
+            model=MODEL_NAME,
+            contents=[
+                prompt,
+                types.Part.from_bytes(data=img_bytes, mime_type="image/png"),
+            ],
+        )
         return {"answer": response.text.strip()}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
