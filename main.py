@@ -298,12 +298,14 @@ def invoice_intelligence(req: InvoiceIntelRequest):
         }
         items = parsed.get("line_items") or []
         clean_items = []
-        for it in items:
-            clean_items.append({
-                "sku": it.get("sku"),
-                "quantity": to_int(it.get("quantity")),
-                "unit_price": to_int(it.get("unit_price")),
-            })
+        if isinstance(items, list):
+            for it in items:
+                if isinstance(it, dict):
+                    clean_items.append({
+                        "sku": it.get("sku"),
+                        "quantity": to_int(it.get("quantity")),
+                        "unit_price": to_int(it.get("unit_price")),
+                    })
         result["line_items"] = clean_items
         result["item_count"] = len(clean_items)
         return result
