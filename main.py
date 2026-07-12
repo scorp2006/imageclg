@@ -5,7 +5,6 @@ import base64
 import json
 import os
 from google import genai
-from google.genai import types
 
 app = FastAPI()
 
@@ -17,7 +16,7 @@ app.add_middleware(
 )
 
 client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
-MODEL_NAME = "gemini-2.0-flash"
+MODEL_NAME = "gemini-3.5-flash"
 
 # ----------------- Image QA -----------------
 
@@ -29,7 +28,6 @@ class QARequest(BaseModel):
 @app.post("/answer-image")
 def answer_image(req: QARequest):
     try:
-        img_bytes = base64.b64decode(req.image_base64)
         prompt = (
             f"Look at the image and answer this question: {req.question}\n"
             "Rules:\n"
@@ -38,14 +36,14 @@ def answer_image(req: QARequest):
             "- For numbers, return just the number (e.g. '4089.35').\n"
             "- No explanation."
         )
-        response = client.models.generate_content(
+        interaction = client.interactions.create(
             model=MODEL_NAME,
-            contents=[
-                prompt,
-                types.Part.from_bytes(data=img_bytes, mime_type="image/png"),
+            input=[
+                {"type": "text", "text": prompt},
+                {"type": "image", "image": {"data": req.image_base64, "mime_type": "image/png"}},
             ],
         )
-        return {"answer": response.text.strip()}
+        return {"answer": interaction.output_text.strip()}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -97,24 +95,30 @@ def coerce_invoice(obj: dict) -> dict:
     return result
 
 
+def extract_json(text: str) -> dict:
+    text = text.strip()
+    if text.startswith("```"):
+        parts = text.split("```")
+        for part in parts:
+            part = part.strip()
+            if part.startswith("json"):
+                part = part[4:].strip()
+            if part.startswith("{"):
+                text = part
+                break
+    return json.loads(text)
+
+
 @app.post("/extract")
 def extract(req: InvoiceRequest):
     try:
         prompt = INVOICE_PROMPT.format(invoice_text=req.invoice_text)
-        response = client.models.generate_content(
+        interaction = client.interactions.create(
             model=MODEL_NAME,
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                response_mime_type="application/json",
-            ),
+            input=prompt,
         )
-        raw = response.text.strip()
-        if raw.startswith("```"):
-            raw = raw.split("```")[1]
-            if raw.startswith("json"):
-                raw = raw[4:]
-            raw = raw.strip()
-        parsed = json.loads(raw)
+        raw = interaction.output_text
+        parsed = extract_json(raw)
         return coerce_invoice(parsed)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -124,4 +128,4 @@ def extract(req: InvoiceRequest):
 
 @app.get("/")
 def root():
-    return {"status": "ok", "endpoints": ["/answer-image", "/extract"]}
+    return {"status": "ok", "endpoints": ["/answer-image", "/extract"], "model": MODEL_NAME}
