@@ -449,9 +449,11 @@ def gemini_transcribe(audio_b64: str, mime: str, attempts_per_model: int = 3) ->
         for attempt in range(attempts_per_model):
             try:
                 req = urllib.request.Request(
-                    f"https://aipipe.org/geminiv1beta/models/{model}:generateContent",
+                    f"https://aipipe.org/geminiv1beta/models/{model}:generateContent"
+                    f"?key={token}",
                     data=body,
                     headers={"Authorization": f"Bearer {token}",
+                             "x-goog-api-key": token,
                              "Content-Type": "application/json"},
                 )
                 with urllib.request.urlopen(req, timeout=120) as resp:
@@ -460,9 +462,13 @@ def gemini_transcribe(audio_b64: str, mime: str, attempts_per_model: int = 3) ->
                 _audio_debug["transcribe_model"] = model
                 return text
             except urllib.error.HTTPError as e:
-                last_err = f"HTTP {e.code} on {model}"
+                try:
+                    detail = e.read().decode()[:200]
+                except Exception:
+                    detail = ""
+                last_err = f"HTTP {e.code} on {model}: {detail}"
                 if e.code in (429, 500, 502, 503, 504):
-                    time.sleep(1.5 * (attempt + 1))
+                    time.sleep(2.0 * (attempt + 1))
                     continue
                 break
             except (KeyError, IndexError):
