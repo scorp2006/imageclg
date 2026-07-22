@@ -772,6 +772,167 @@ def audio_debug():
     return _audio_debug
 
 
+# ================= GA4 Q3: Grounded Answer API =================
+
+@app.post("/grounded-answer")
+async def grounded_answer(request: Request):
+    try:
+        body = await request.json()
+    except Exception:
+        return {"answer": "I don't know", "citations": [], "confidence": 0.1,
+                "answerable": False}
+
+    question = (body.get("question") or "").strip()
+    chunks = body.get("chunks") or []
+
+    if not question or not isinstance(chunks, list) or not chunks:
+        return {"answer": "I don't know", "citations": [], "confidence": 0.1,
+                "answerable": False}
+
+    valid_ids = [c.get("chunk_id") for c in chunks if isinstance(c, dict) and c.get("chunk_id")]
+
+    prompt = (
+        "You are a strictly grounded QA system for medical and legal compliance.\n"
+        "Answer the question using ONLY the information present in the provided chunks.\n\n"
+        "Rules:\n"
+        "1. If the question CANNOT be fully answered from the chunks, return:\n"
+        '   answerable=false, answer="I don\'t know", citations=[], confidence=0.1\n'
+        "2. If it CAN be answered, return answerable=true, a concise grounded answer, "
+        "citations listing ONLY the chunk_id values you actually used, and a confidence "
+        "between 0.8 and 1.0.\n"
+        "3. NEVER use outside knowledge. If the chunks are about a different topic than "
+        "the question, that is unanswerable.\n"
+        "4. Cite only chunk_ids that appear in the provided chunks.\n\n"
+        "Return JSON with exactly these keys: answer, citations, confidence, answerable.\n\n"
+        f"QUESTION:\n{question}\n\n"
+        f"CHUNKS:\n{json.dumps(chunks, indent=2)}"
+    )
+
+    try:
+        raw = chat(prompt, json_mode=True)
+        out = extract_json(raw)
+    except Exception:
+        return {"answer": "I don't know", "citations": [], "confidence": 0.1,
+                "answerable": False}
+
+    answerable = bool(out.get("answerable", False))
+    answer = str(out.get("answer", "") or "")
+
+    # Treat an "I don't know" answer as unanswerable regardless of the flag.
+    if not answerable or answer.strip().lower().rstrip(".") in ("i don't know", "i dont know"):
+        return {"answer": "I don't know", "citations": [], "confidence": 0.1,
+                "answerable": False}
+
+    cites = [c for c in (out.get("citations") or []) if c in valid_ids]
+    if not cites:
+        # An answerable claim with no valid citation is ungrounded — refuse it.
+        return {"answer": "I don't know", "citations": [], "confidence": 0.1,
+                "answerable": False}
+
+    try:
+        conf = float(out.get("confidence", 0.9))
+    except Exception:
+        conf = 0.9
+    conf = min(max(conf, 0.8), 1.0)   # answerable must stay well above the 0.3 cutoff
+
+    return {"answer": answer, "citations": cites, "confidence": conf, "answerable": True}
+
+
+# ================= GA4 Q5: GraphRAG Pipeline =================
+
+@app.post("/extract-graph")
+async def extract_graph(request: Request):
+    try:
+        body = await request.json()
+    except Exception:
+        return {"entities": [], "relationships": []}
+
+    text = body.get("text", "")
+    prompt = (
+        "Extract entities and relationships from the text for a knowledge graph.\n\n"
+        "Entity types (use ONLY these): Person, Organization, Product, Framework\n"
+        "Relationship types (use ONLY these): FOUNDED, DEVELOPED, INTEGRATED_INTO, "
+        "HIRED, AUTHORED\n\n"
+        "Map natural phrasing to the allowed relations:\n"
+        "- 'created', 'built', 'made', 'developed' -> DEVELOPED\n"
+        "- 'founded', 'started', 'co-founded' -> FOUNDED\n"
+        "- 'integrates with', 'built into', 'embedded in' -> INTEGRATED_INTO\n"
+        "- 'hired', 'recruited', 'joined as' -> HIRED\n"
+        "- 'wrote', 'authored', 'published' -> AUTHORED\n\n"
+        "Use exact entity names as they appear in the text. Every relationship's source "
+        "and target must be an entity you also list.\n\n"
+        "Return JSON: {\"entities\": [{\"name\": ..., \"type\": ...}], "
+        "\"relationships\": [{\"source\": ..., \"target\": ..., \"relation\": ...}]}\n\n"
+        f"TEXT:\n{text}"
+    )
+    try:
+        out = extract_json(chat(prompt, json_mode=True))
+        return {"entities": out.get("entities", []) or [],
+                "relationships": out.get("relationships", []) or []}
+    except Exception:
+        return {"entities": [], "relationships": []}
+
+
+@app.post("/graph-query")
+async def graph_query(request: Request):
+    try:
+        body = await request.json()
+    except Exception:
+        return {"answer": "", "reasoning_path": [], "hops": 0}
+
+    question = body.get("question", "")
+    graph = body.get("graph", {})
+
+    prompt = (
+        "You are a multi-hop reasoning agent over a knowledge graph.\n"
+        "Answer the question by tracing a path through the graph's relationships.\n\n"
+        "Return JSON with exactly these keys:\n"
+        '- "answer": the brief factual answer (an entity name, usually)\n'
+        '- "reasoning_path": the ordered list of entity names traversed, starting from '
+        "the entity mentioned in the question and ending at the answer\n"
+        '- "hops": the number of relationship edges traversed (len(reasoning_path) - 1)\n\n'
+        "Use ONLY entities and relationships present in the graph.\n\n"
+        f"QUESTION:\n{question}\n\n"
+        f"GRAPH:\n{json.dumps(graph, indent=2)}"
+    )
+    try:
+        out = extract_json(chat(prompt, json_mode=True))
+        path = out.get("reasoning_path") or []
+        if not isinstance(path, list):
+            path = []
+        return {"answer": str(out.get("answer", "") or ""),
+                "reasoning_path": path,
+                "hops": max(len(path) - 1, 0)}
+    except Exception:
+        return {"answer": "", "reasoning_path": [], "hops": 0}
+
+
+@app.post("/community-summary")
+async def community_summary(request: Request):
+    try:
+        body = await request.json()
+    except Exception:
+        return {"community_id": "", "summary": ""}
+
+    community_id = body.get("community_id", "")
+    entities = body.get("entities", [])
+    relationships = body.get("relationships", [])
+
+    prompt = (
+        "Summarize this community of a knowledge graph in one concise paragraph.\n"
+        "Explain how the entities connect and what the overall theme is. Name the key "
+        "entities explicitly and describe the relationships between them.\n\n"
+        'Return JSON: {"summary": "..."}\n\n'
+        f"ENTITIES:\n{json.dumps(entities, indent=2)}\n\n"
+        f"RELATIONSHIPS:\n{json.dumps(relationships, indent=2)}"
+    )
+    try:
+        out = extract_json(chat(prompt, json_mode=True))
+        return {"community_id": community_id, "summary": str(out.get("summary", "") or "")}
+    except Exception:
+        return {"community_id": community_id, "summary": ""}
+
+
 # ----------------- Health -----------------
 
 @app.get("/")
@@ -781,7 +942,8 @@ def root():
         "endpoints": [
             "/answer-image", "/extract", "/dynamic-extract",
             "/invoice-intelligence", "/semantic-search", "/solve",
-            "/answer-audio",
+            "/answer-audio", "/grounded-answer", "/extract-graph",
+            "/graph-query", "/community-summary",
         ],
         "chat_model": CHAT_MODEL,
         "embed_model": EMBED_MODEL,
