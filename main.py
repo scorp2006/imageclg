@@ -5,8 +5,7 @@ from typing import Dict, Any
 import base64
 import json
 import os
-from google import genai
-from google.genai import types as gtypes
+from openai import OpenAI
 
 app = FastAPI()
 
@@ -17,8 +16,14 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
-MODEL_NAME = "gemini-3.5-flash"
+client = OpenAI(
+    api_key=os.environ["OPENAI_API_KEY"],
+    base_url=os.environ.get("OPENAI_BASE_URL", "https://aipipe.org/openai/v1"),
+)
+
+CHAT_MODEL = "gpt-4o-mini"
+VISION_MODEL = "gpt-4o-mini"
+EMBED_MODEL = "text-embedding-3-small"
 
 
 # ----------------- Helpers -----------------
@@ -37,6 +42,33 @@ def extract_json(text: str) -> dict:
     return json.loads(text)
 
 
+def chat(prompt: str, json_mode: bool = False) -> str:
+    kwargs = {
+        "model": CHAT_MODEL,
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": 0,
+    }
+    if json_mode:
+        kwargs["response_format"] = {"type": "json_object"}
+    resp = client.chat.completions.create(**kwargs)
+    return resp.choices[0].message.content
+
+
+def to_int_safe(v):
+    if v is None:
+        return None
+    if isinstance(v, bool):
+        return int(v)
+    if isinstance(v, (int, float)):
+        return int(v)
+    if isinstance(v, str):
+        try:
+            return int(float(v.replace(",", "").replace("$", "").strip()))
+        except Exception:
+            return None
+    return None
+
+
 # ----------------- Image QA -----------------
 
 class QARequest(BaseModel):
@@ -47,30 +79,40 @@ class QARequest(BaseModel):
 @app.post("/answer-image")
 def answer_image(req: QARequest):
     try:
-        img_bytes = base64.b64decode(req.image_base64)
         prompt = (
             f"Carefully analyze the image and answer this question: {req.question}\n\n"
             "Response rules:\n"
             "- Read all text, numbers, and labels visible in the image.\n"
             "- If the image contains a table, chart, receipt, or invoice, extract exact numeric values.\n"
-            "- For numeric answers (sums, totals, maximums, averages): return ONLY the number as a plain string, no currency symbols, no units, no commas (e.g. '4089.35' not '$4,089.35').\n"
-            "- For categorical answers (e.g. 'which category is largest'): return just the category name as a string.\n"
-            "- No explanation, no reasoning, no punctuation at the end.\n"
-            "- Return exactly what would go in the JSON 'answer' field."
+            "- For numeric answers (sums, totals, maximums, averages): return ONLY the number as a plain string, "
+            "no currency symbols, no units, no commas (e.g. '4089.35' not '$4,089.35').\n"
+            "- For categorical answers (e.g. 'which category is largest'): return just the category name.\n"
+            "- No explanation, no reasoning, no punctuation at the end."
         )
-        response = client.models.generate_content(
-            model=MODEL_NAME,
-            contents=[
-                prompt,
-                gtypes.Part.from_bytes(data=img_bytes, mime_type="image/png"),
+        resp = client.chat.completions.create(
+            model=VISION_MODEL,
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": prompt},
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:image/png;base64,{req.image_base64}"
+                            },
+                        },
+                    ],
+                }
             ],
+            temperature=0,
         )
-        return {"answer": response.text.strip()}
+        return {"answer": resp.choices[0].message.content.strip()}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# ----------------- Invoice Extract -----------------
+# ----------------- Invoice Extract (fixed schema) -----------------
 
 SCHEMA_KEYS = ["invoice_no", "date", "vendor", "amount", "tax", "currency"]
 
@@ -89,14 +131,12 @@ Fields to extract:
 - tax: number, the TAX AMOUNT ONLY (null if not found). Not the tax rate.
 - currency: string, e.g. "INR", "USD", "EUR" (null if not found). If you see "Rs." treat it as INR.
 
-Return ONLY a valid JSON object with exactly these 6 keys. No explanation, no markdown, no code fences.
+Return ONLY a valid JSON object with exactly these 6 keys.
 
 Invoice text:
 ---
 {invoice_text}
----
-
-JSON:"""
+---"""
 
 
 def coerce_invoice(obj: dict) -> dict:
@@ -110,7 +150,8 @@ def coerce_invoice(obj: dict) -> dict:
         v = result.get(k)
         if isinstance(v, str):
             try:
-                cleaned = v.replace(",", "").replace("Rs.", "").replace("USD", "").replace("INR", "").replace("EUR", "").strip()
+                cleaned = (v.replace(",", "").replace("Rs.", "").replace("USD", "")
+                           .replace("INR", "").replace("EUR", "").strip())
                 result[k] = float(cleaned)
             except Exception:
                 result[k] = None
@@ -121,11 +162,7 @@ def coerce_invoice(obj: dict) -> dict:
 def extract(req: InvoiceRequest):
     try:
         prompt = INVOICE_PROMPT.format(invoice_text=req.invoice_text)
-        interaction = client.interactions.create(
-            model=MODEL_NAME,
-            input=prompt,
-        )
-        raw = interaction.output_text
+        raw = chat(prompt, json_mode=True)
         parsed = extract_json(raw)
         return coerce_invoice(parsed)
     except Exception as e:
@@ -152,13 +189,13 @@ def coerce_value(value: Any, target_type: str) -> Any:
             if isinstance(value, (int, float)):
                 return int(value)
             if isinstance(value, str):
-                cleaned = value.replace(",", "").strip()
-                return int(float(cleaned))
+                return int(float(value.replace(",", "").strip()))
         if t == "float":
             if isinstance(value, (int, float)):
                 return float(value)
             if isinstance(value, str):
-                cleaned = value.replace(",", "").replace("Rs.", "").replace("USD", "").replace("INR", "").strip()
+                cleaned = (value.replace(",", "").replace("Rs.", "")
+                           .replace("USD", "").replace("INR", "").strip())
                 return float(cleaned)
         if t == "boolean":
             if isinstance(value, bool):
@@ -172,9 +209,7 @@ def coerce_value(value: Any, target_type: str) -> Any:
             if isinstance(value, (int, float)):
                 return bool(value)
         if t == "date":
-            if isinstance(value, str):
-                return value.strip()
-            return str(value)
+            return str(value).strip()
         if t == "array[string]":
             if isinstance(value, list):
                 return [str(x) for x in value]
@@ -211,19 +246,12 @@ Rules:
 - Booleans must be true/false (not "true"/"false").
 - array[string] must be a JSON array of strings.
 - array[integer] must be a JSON array of integers.
-- No markdown, no code fences, no explanation.
 
 Text:
 ---
 {req.text}
----
-
-JSON:"""
-        interaction = client.interactions.create(
-            model=MODEL_NAME,
-            input=prompt,
-        )
-        raw = interaction.output_text
+---"""
+        raw = chat(prompt, json_mode=True)
         parsed = extract_json(raw)
         result = {}
         for key, target_type in req.schema.items():
@@ -233,7 +261,7 @@ JSON:"""
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# ----------------- Q7: Invoice Intelligence -----------------
+# ----------------- Invoice Intelligence -----------------
 
 class InvoiceIntelRequest(BaseModel):
     document_id: str = ""
@@ -244,8 +272,8 @@ class InvoiceIntelRequest(BaseModel):
 INVOICE_INTEL_PROMPT = """You are an invoice extraction engine. Extract these fields from the invoice text and return ONLY valid JSON with EXACTLY these keys:
 
 - vendor: the biller's proper name, exactly as written (string)
-- currency: ISO 4217 code (USD, EUR, GBP, INR, JPY). Text may say "euros", "₹", "pounds sterling", "dollars", "rupees", "yen" etc.
-- total_amount: integer in main unit, no separators/symbols. May be spelled out ("twelve thousand four hundred eighty" -> 12480), grouped "12,480" or "1,24,800", or "12K" -> 12000.
+- currency: ISO 4217 code (USD, EUR, GBP, INR, JPY). Text may say "euros", "rupees", "pounds sterling", "dollars", "yen", or use symbols.
+- total_amount: integer in main unit, no separators/symbols. May be spelled out ("twelve thousand four hundred eighty" -> 12480), grouped "12,480" or "1,24,800" -> 124800, or "12K" -> 12000.
 - invoice_date: normalize to YYYY-MM-DD (string)
 - due_in_days: integer ("Net 30" -> 30, "payable within 45 days" -> 45, "due in two weeks" -> 14)
 - is_paid: boolean ("paid in full" -> true, "awaiting payment" -> false)
@@ -254,37 +282,20 @@ INVOICE_INTEL_PROMPT = """You are an invoice extraction engine. Extract these fi
 - line_items: array of objects each with keys sku, quantity, unit_price, in order they appear; unit_price is integer
 - item_count: integer number of line items
 
-Return ONLY the JSON object, no markdown, no code fences, no explanation.
+Return ONLY the JSON object.
 
 Invoice text:
 ---
 {text}
----
-
-JSON:"""
-
-
-def to_int_safe(v):
-    if v is None:
-        return None
-    if isinstance(v, bool):
-        return int(v)
-    if isinstance(v, (int, float)):
-        return int(v)
-    if isinstance(v, str):
-        try:
-            return int(float(v.replace(",", "").replace("$", "").strip()))
-        except Exception:
-            return None
-    return None
+---"""
 
 
 @app.post("/invoice-intelligence")
 def invoice_intelligence(req: InvoiceIntelRequest):
     try:
         prompt = INVOICE_INTEL_PROMPT.format(text=req.text)
-        interaction = client.interactions.create(model=MODEL_NAME, input=prompt)
-        parsed = extract_json(interaction.output_text)
+        raw = chat(prompt, json_mode=True)
+        parsed = extract_json(raw)
         if not isinstance(parsed, dict):
             parsed = {}
 
@@ -318,20 +329,12 @@ def invoice_intelligence(req: InvoiceIntelRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# ----------------- Q8: Semantic Search Top-K -----------------
+# ----------------- Semantic Search Top-K -----------------
 
 class SemanticSearchRequest(BaseModel):
     query_id: str = ""
     query: str
     candidates: list
-
-
-def embed_texts(texts):
-    result = client.models.embed_content(
-        model="gemini-embedding-001",
-        contents=texts,
-    )
-    return [e.values for e in result.embeddings]
 
 
 def cosine(a, b):
@@ -348,18 +351,18 @@ def cosine(a, b):
 def semantic_search(req: SemanticSearchRequest):
     try:
         all_texts = [req.query] + list(req.candidates)
-        embeddings = embed_texts(all_texts)
+        resp = client.embeddings.create(model=EMBED_MODEL, input=all_texts)
+        embeddings = [d.embedding for d in resp.data]
         q_emb = embeddings[0]
         cand_embs = embeddings[1:]
         scored = [(i, cosine(q_emb, e)) for i, e in enumerate(cand_embs)]
         scored.sort(key=lambda x: -x[1])
-        top3 = [i for i, _ in scored[:3]]
-        return {"ranking": top3}
+        return {"ranking": [i for i, _ in scored[:3]]}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# ----------------- Q9: Word Problem Solver -----------------
+# ----------------- Word Problem Solver -----------------
 
 class WordProblemRequest(BaseModel):
     problem_id: str = ""
@@ -378,14 +381,13 @@ Return ONLY valid JSON with EXACTLY two keys:
 - "reasoning": a string of at least 80 characters showing your calculation steps
 - "answer": a JSON integer (not a string, not a float, no currency symbols)
 
-No markdown, no code fences, no extra keys.
-
-JSON:"""
-        interaction = client.interactions.create(model=MODEL_NAME, input=prompt)
-        parsed = extract_json(interaction.output_text)
+No extra keys."""
+        raw = chat(prompt, json_mode=True)
+        parsed = extract_json(raw)
         reasoning = str(parsed.get("reasoning", ""))
         if len(reasoning) < 80:
-            reasoning = reasoning + " " + "The irrelevant distractor numbers in the problem were identified and excluded from the final calculation to arrive at the correct integer answer."
+            reasoning += (" The irrelevant distractor numbers in the problem were identified and "
+                          "excluded from the final calculation to arrive at the correct integer answer.")
         ans = parsed.get("answer")
         if isinstance(ans, str):
             ans = int(float(ans.replace(",", "").strip()))
@@ -406,5 +408,6 @@ def root():
             "/answer-image", "/extract", "/dynamic-extract",
             "/invoice-intelligence", "/semantic-search", "/solve",
         ],
-        "model": MODEL_NAME,
+        "chat_model": CHAT_MODEL,
+        "embed_model": EMBED_MODEL,
     }
