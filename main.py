@@ -838,6 +838,107 @@ async def grounded_answer(request: Request):
     return {"answer": answer, "citations": cites, "confidence": conf, "answerable": True}
 
 
+# ================= GA4 Q4: Vector Search with Re-ranking =================
+
+_Q4_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "q4data")
+Q4_DOCS = []
+Q4_EMB = {}
+Q4_RERANK = {}
+
+try:
+    import csv as _csv
+    with open(os.path.join(_Q4_DIR, "documents.csv"), encoding="utf-8") as _f:
+        for _row in _csv.DictReader(_f):
+            # year must be numeric for gte/lte comparisons
+            try:
+                _row["year"] = int(_row["year"])
+            except Exception:
+                pass
+            Q4_DOCS.append(_row)
+    with open(os.path.join(_Q4_DIR, "embeddings.json"), encoding="utf-8") as _f:
+        Q4_EMB = json.load(_f)
+    with open(os.path.join(_Q4_DIR, "reranker_scores.json"), encoding="utf-8") as _f:
+        Q4_RERANK = json.load(_f)
+except Exception as _e:
+    print(f"Q4 data load failed: {_e}")
+
+
+def _matches_filter(doc: dict, filters: dict) -> bool:
+    for key, cond in (filters or {}).items():
+        val = doc.get(key)
+        if isinstance(cond, dict):
+            if "gte" in cond:
+                try:
+                    if not (float(val) >= float(cond["gte"])):
+                        return False
+                except Exception:
+                    return False
+            if "lte" in cond:
+                try:
+                    if not (float(val) <= float(cond["lte"])):
+                        return False
+                except Exception:
+                    return False
+            if "in" in cond:
+                if val not in cond["in"]:
+                    return False
+        else:
+            # exact match; compare as strings when types differ (e.g. year given as str)
+            if val != cond and str(val) != str(cond):
+                return False
+    return True
+
+
+def _cosine(a, b) -> float:
+    import math
+    dot = sum(x * y for x, y in zip(a, b))
+    na = math.sqrt(sum(x * x for x in a))
+    nb = math.sqrt(sum(y * y for y in b))
+    if na == 0 or nb == 0:
+        return 0.0
+    return dot / (na * nb)
+
+
+@app.post("/vector-search")
+async def vector_search(request: Request):
+    try:
+        body = await request.json()
+    except Exception:
+        return {"matches": []}
+
+    query_id = body.get("query_id")
+    query_vector = body.get("query_vector") or []
+    top_k = int(body.get("top_k", 10) or 10)
+    rerank_top_n = int(body.get("rerank_top_n", 3) or 3)
+    filters = body.get("filter") or {}
+
+    if not query_vector:
+        return {"matches": []}
+
+    # Stage 1: metadata filter, then cosine similarity.
+    # Sort desc by similarity; ties broken by lexicographically smaller doc_id.
+    scored = []
+    for doc in Q4_DOCS:
+        if not _matches_filter(doc, filters):
+            continue
+        doc_id = doc.get("doc_id")
+        emb = Q4_EMB.get(doc_id)
+        if emb is None:
+            continue
+        scored.append((doc_id, _cosine(query_vector, emb)))
+
+    scored.sort(key=lambda x: (-x[1], x[0]))
+    candidates = scored[:top_k]
+
+    # Stage 2: re-rank the candidates by the lookup table for this query.
+    # Same ordering rule: desc score, tie-break lexicographically smaller doc_id.
+    table = Q4_RERANK.get(query_id, {}) if query_id else {}
+    reranked = [(doc_id, table.get(doc_id, float("-inf"))) for doc_id, _ in candidates]
+    reranked.sort(key=lambda x: (-x[1], x[0]))
+
+    return {"matches": [doc_id for doc_id, _ in reranked[:rerank_top_n]]}
+
+
 # ================= GA4 Q5: GraphRAG Pipeline =================
 
 @app.post("/extract-graph")
@@ -942,9 +1043,10 @@ def root():
         "endpoints": [
             "/answer-image", "/extract", "/dynamic-extract",
             "/invoice-intelligence", "/semantic-search", "/solve",
-            "/answer-audio", "/grounded-answer", "/extract-graph",
-            "/graph-query", "/community-summary",
+            "/answer-audio", "/grounded-answer", "/vector-search",
+            "/extract-graph", "/graph-query", "/community-summary",
         ],
+        "q4_docs_loaded": len(Q4_DOCS),
         "chat_model": CHAT_MODEL,
         "embed_model": EMBED_MODEL,
     }
