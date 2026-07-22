@@ -522,17 +522,18 @@ Korean to English statistic mapping:
 - '허용값' / '허용된 값' -> allowed_values
 - '상관관계' -> correlation ('양의'/비례 = positive, '음의'/반비례 = negative)
 
-Return ONLY valid JSON:
+Return ONLY valid JSON in this SHAPE. The values below are placeholders showing
+the structure — they are NOT real data. Never copy them into your answer. Every
+column name and number you output MUST come from the transcript itself.
 {
-  "columns": ["column_name"],
-  "data_rows": [[val1], [val2]],
-  "num_rows": 140,
+  "columns": ["<column name exactly as spoken in the transcript>"],
+  "data_rows": [["<value>"]],
+  "num_rows": null,
   "explicit_stats": {
-    "value_range": {"점수": [0, 100]},
-    "median": {"소득": 45000},
-    "correlation": [{"x": "키", "y": "몸무게", "type": "positive"}]
+    "<stat name>": {"<column name from transcript>": "<value from transcript>"},
+    "correlation": [{"x": "<col A>", "y": "<col B>", "type": "positive"}]
   },
-  "requested_stats": ["median"]
+  "requested_stats": ["<stat name>"]
 }
 
 CRITICAL RULES:
@@ -541,8 +542,9 @@ CRITICAL RULES:
 3. Keep column names exactly as spoken.
 4. allowed_values is ONLY for categorical columns with an explicitly listed permitted set — triggered by '허용값' or a one-of enumeration ('<col>는 A, B, C 중 하나입니다'). For purely numeric columns with no listed category set, NEVER emit allowed_values.
 5. correlation MUST be a LIST of {"x": colA, "y": colB, "type": "positive"|"negative"} — one per stated relationship. Put both column names in 'columns' too. NEVER output a correlation matrix.
-6. If a constraint like '값은 0에서 1 사이입니다' is stated, extract the subject ('값', '점수') as a column name into 'columns' AND map the constraint in 'explicit_stats'. Never leave 'columns' empty when a constraint is mentioned.
+6. If a constraint like '<subject>은 0에서 1 사이입니다' is stated, extract that subject as a column name into 'columns' AND map the constraint in 'explicit_stats'. Never leave 'columns' empty when a constraint is mentioned.
 7. requested_stats: choose ONLY from mean, std, variance, min, max, median, mode, range, allowed_values, value_range, correlation. If nothing specific was asked, return the full list.
+8. Output ONLY columns that are actually named in the transcript below. If the transcript mentions exactly one column, 'columns' must contain exactly one entry. Never add columns from the examples above or from any other source.
 
 TRANSCRIPT:
 """
@@ -593,6 +595,12 @@ async def answer_audio(request: Request):
     _audio_debug["transcript"] = transcript
 
     columns, data_rows, req_stats, num_rows, explicit_stats = [], [], [], None, {}
+    if not transcript.strip():
+        # Transcription failed — return the empty shape rather than let the model
+        # invent columns from the prompt's placeholder examples.
+        return {"rows": 0, "columns": [], "mean": {}, "std": {}, "variance": {},
+                "min": {}, "max": {}, "median": {}, "mode": {}, "range": {},
+                "allowed_values": {}, "value_range": {}, "correlation": []}
     try:
         raw_llm = chat(AUDIO_EXTRACT_PROMPT + transcript, json_mode=True)
         _audio_debug["raw_llm"] = raw_llm
