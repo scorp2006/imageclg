@@ -1523,33 +1523,27 @@ def _rt_has_internal_redirect_target(parsed) -> bool:
                     break
                 v = dv
             v_low = v.strip().lower()
-            # an embedded absolute URL -> check its host
+            # ONLY inspect the value when the parameter is a genuine redirect/URL
+            # param. A benign non-redirect param (e.g. ?q=<search text>) may legally
+            # contain a URL or IP as data and must NOT be treated as an SSRF target.
+            if not is_redirect_key:
+                continue
+            # embedded absolute URL in a redirect param -> check its host
             for m in re.findall(r'[a-z][a-z0-9+.\-]*://([^/\\?#\s"\']+)', v_low):
                 emb_host = m.split("@")[-1].split(":")[0]
                 if _rt_host_is_internal(emb_host):
                     return True
-            # a redirect param whose value is a scheme-relative //host, or a
-            # host-LIKE token (contains a dot or a colon-port, or is a known
-            # internal name). A BARE integer/word (page number, id, search term)
-            # is NOT a host and must not be read as a decimal IP.
-            if is_redirect_key:
-                bare = v_low.lstrip("/")
-                bare_host = bare.split("/")[0].split("@")[-1].split(":")[0].split("?")[0]
-                host_like = (v_low.startswith("//")
-                             or "." in bare_host
-                             or bare_host in ("localhost", "metadata",
-                                              "metadata.google.internal",
-                                              "instance-data"))
-                if host_like and _rt_host_is_internal(bare_host):
-                    return True
-    # 2) internal target smuggled in the path or the whole query blob
-    blob = _unquote((parsed.path or "") + "?" + (parsed.query or "")).lower()
-    for m in re.findall(r'[a-z][a-z0-9+.\-]*://([^/\\?#\s"\']+)', blob):
-        emb_host = m.split("@")[-1].split(":")[0]
-        if _rt_host_is_internal(emb_host):
-            return True
-    if "169.254.169.254" in blob or "metadata.google.internal" in blob:
-        return True
+            # scheme-relative //host or a host-LIKE bare token (has a dot / known
+            # internal name). A bare integer/word is not a host.
+            bare = v_low.lstrip("/")
+            bare_host = bare.split("/")[0].split("@")[-1].split(":")[0].split("?")[0]
+            host_like = (v_low.startswith("//")
+                         or "." in bare_host
+                         or bare_host in ("localhost", "metadata",
+                                          "metadata.google.internal",
+                                          "instance-data"))
+            if host_like and _rt_host_is_internal(bare_host):
+                return True
     return False
 
 
