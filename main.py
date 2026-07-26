@@ -1475,12 +1475,11 @@ async def redteam_guard(request: Request):
     if tool == "read_file":
         raw = str(arguments.get("path", ""))
 
-        # The spec's canonical sandbox root is /srv/agent-redteam/sandbox-574665e248,
-        # but the files actually live under _RT_SANDBOX (writable /tmp). Map the
-        # canonical prefix onto the real one so absolute /srv paths resolve too.
         SPEC_ROOT = "/srv/agent-redteam/sandbox-574665e248"
         SPEC_OUTSIDE = "/srv/agent-redteam/outside-2c2dca24"
 
+        # Map the canonical /srv prefix onto the real /tmp root; leave
+        # relative paths relative to the sandbox root.
         def _to_real(p):
             if p.startswith(SPEC_ROOT):
                 p = _RT_SANDBOX + p[len(SPEC_ROOT):]
@@ -1492,35 +1491,64 @@ async def redteam_guard(request: Request):
 
         root_real = _os.path.realpath(_RT_SANDBOX)
 
-        def _resolve(p):
-            cand = _to_real(p)
-            try:
-                return _os.path.realpath(cand)
-            except Exception:
-                return posixpath.normpath(cand)
-
         def _inside(rp):
             return rp == root_real or rp.startswith(root_real + "/")
 
-        real_literal = _resolve(raw)
-        real_decoded = _resolve(_unquote(raw))
+        # Consider both the literal path and its percent-decoded form. A real
+        # traversal attempt shows up as a ".." (or "~") segment in EITHER form.
+        forms = {raw, _unquote(raw)}
 
-        # Allow only if BOTH the literal and percent-decoded forms stay inside
-        # (defeats %2e%2e encoded traversal) — but a file whose real NAME
-        # literally contains %2e still resolves inside and is allowed.
-        if not (_inside(real_literal) and _inside(real_decoded)):
+        # 1) Reject obvious traversal / home-expansion intent in the raw input.
+        #    "%2e"/"%2E" already covered by decoding above. "...."-style and
+        #    literal ".." segments are hard rejects; "~" home refs too.
+        for f in forms:
+            # split on both slash types, normalise nothing yet
+            segs = f.replace("\\", "/").split("/")
+            for s in segs:
+                if s == ".." or s == "~" or s.startswith("~"):
+                    return {"action": "block",
+                            "reason": "Path traversal or home reference is not allowed.",
+                            "result": None}
+                # "...." "....." etc collapse to traversal on some FS parsers
+                if len(s) >= 4 and set(s) == {"."}:
+                    return {"action": "block",
+                            "reason": "Suspicious dot-run path segment blocked.",
+                            "result": None}
+
+        # 2) Resolve every form and require it to land strictly inside root.
+        resolved = []
+        for f in forms:
+            cand = _to_real(f)
+            try:
+                rp = _os.path.realpath(cand)
+            except Exception:
+                rp = posixpath.normpath(cand)
+            resolved.append(rp)
+        if not all(_inside(rp) for rp in resolved):
             return {"action": "block",
                     "reason": "Path escapes the sandbox root.", "result": None}
 
-        target = real_literal if _os.path.exists(real_literal) else real_decoded
+        # 3) The path must resolve to a file that actually EXISTS inside the
+        #    sandbox. Attack paths that merely *look* inside but point at a
+        #    non-existent location (…/outside/…) never match a real file, so
+        #    they are blocked here rather than "allowed with empty content".
+        target = None
+        for rp in resolved:
+            if _os.path.isfile(rp) and _inside(rp):
+                target = rp
+                break
+        if target is None:
+            return {"action": "block",
+                    "reason": "No such file inside the sandbox.", "result": None}
+
         try:
             with open(target, "r", errors="replace") as f:
                 content = f.read()
             return {"action": "allow", "reason": "Read within sandbox.",
                     "result": {"content": content}}
         except Exception:
-            return {"action": "allow", "reason": "Read within sandbox (file missing).",
-                    "result": {"content": ""}}
+            return {"action": "block",
+                    "reason": "Unreadable file.", "result": None}
 
     # ---- fetch_url: only exact allowed hosts, SSRF-guarded ----
     if tool == "fetch_url":
@@ -1537,7 +1565,9 @@ async def redteam_guard(request: Request):
         if parsed.username or parsed.password or "@" in (parsed.netloc or ""):
             return {"action": "block", "reason": "URL contains userinfo.", "result": None}
 
-        host = (parsed.hostname or "").lower().rstrip(".")
+        # EXACT host match — do NOT strip a trailing dot. "example.com." is a
+        # distinct absolute-DNS form and must be treated as a lookalike/block.
+        host = (parsed.hostname or "").lower()
         if host not in _RT_ALLOWED_HOSTS:
             return {"action": "block", "reason": "Host not on allowlist.", "result": None}
         if not _is_safe_public_host(host):
