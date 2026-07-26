@@ -2063,6 +2063,18 @@ def _mr_validate_proposal(prop: dict, dossier: dict) -> dict:
             seen.add(lid)
             evidence.append(lid)
 
+    # Contract guard: an action other than no_action MUST have every documented
+    # payload key populated and a valid target id. If the model failed to extract
+    # a required value (leaving it null/empty), that proposal would be a contract
+    # error — downgrade to a safe no_action instead of emitting an invalid one.
+    if action != "no_action":
+        payload_ok = all(payload.get(k) not in (None, "") for k in payload)
+        target_ok = (target is None) or bool((target or {}).get("id"))
+        if not payload_ok or not target_ok:
+            safe = _mr_safe_no_action(dossier_id, reason_code="INFORMATIONAL")
+            safe["evidence"] = evidence[:1]  # keep one cited line if available
+            return safe
+
     return {
         "dossierId": dossier_id,
         "action": action,
