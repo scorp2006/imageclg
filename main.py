@@ -1149,12 +1149,33 @@ async def guardrail(request: Request):
 
     # ---- write_file: allow only inside /srv/reports ----
     if tool == "write_file":
-        path = _normalize_path(str(body.get("path", "")))
-        if path == _WRITE_ROOT or path.startswith(_WRITE_ROOT + "/"):
+        raw_path = str(body.get("path", ""))
+
+        # A write is safe only if EVERY interpretation of the path stays inside
+        # /srv/reports. We check the raw form plus decoded variants so that
+        # percent-encoded dotdots, backslash separators, and null bytes cannot
+        # smuggle a traversal past posixpath.normpath.
+        from urllib.parse import unquote as _uq
+        variants = set()
+        for v in (raw_path, _uq(raw_path), _uq(_uq(raw_path))):
+            variants.add(v)
+            variants.add(v.replace("\\", "/"))          # treat backslash as sep
+            variants.add(v.replace("\x00", ""))         # strip null bytes
+            variants.add(v.replace("\\", "/").replace("\x00", ""))
+
+        def _inside(p):
+            n = _normalize_path(p)
+            return n == _WRITE_ROOT or n.startswith(_WRITE_ROOT + "/")
+
+        # Block if the literal contains raw traversal/encoding tricks that any
+        # interpretation would escape with.
+        all_inside = all(_inside(v) for v in variants)
+
+        if all_inside:
             return {"decision": "allow",
                     "reason": "Write is inside the permitted /srv/reports directory."}
         return {"decision": "block",
-                "reason": "Writes are only allowed inside /srv/reports."}
+                "reason": "Writes are only allowed inside /srv/reports (traversal blocked)."}
 
     # ---- http_request: allow only exact allowlisted hosts ----
     if tool == "http_request":
