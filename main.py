@@ -1395,7 +1395,7 @@ async def run_guard(request: Request):
 
 import ipaddress
 import socket
-from urllib.parse import urlparse as _urlparse2, unquote as _unquote
+from urllib.parse import urlparse as _urlparse2, unquote as _unquote, urljoin as _urljoin
 
 import os as _os_rt
 
@@ -1579,33 +1579,65 @@ async def redteam_guard(request: Request):
         if not _is_safe_public_host(host):
             return {"action": "block", "reason": "Host resolves to a non-public address.", "result": None}
 
-        # Fetch WITHOUT following redirects. A redirect from an allowed host is a
-        # classic SSRF pivot (e.g. 302 -> http://169.254.169.254/), so a redirect
-        # response must be BLOCKED, not allowed with an empty body.
+        # Fetch, following redirects MANUALLY so each hop's target host is
+        # re-validated. A benign HTTP->HTTPS upgrade on the same allowed host is
+        # fine; a redirect to a private/loopback/other host is an SSRF pivot and
+        # is blocked. This keeps benign controls working while still stopping
+        # redirect-to-private.
         try:
             import urllib.request as _ur
             import urllib.error as _uerr
-            req = _ur.Request(url, headers={"User-Agent": "guardrail/1.0"})
-            opener = _ur.build_opener(_NoRedirect())
-            try:
-                with opener.open(req, timeout=6) as resp:
-                    status = getattr(resp, "status", 200) or 200
-                    if 300 <= int(status) < 400:
-                        return {"action": "block",
-                                "reason": "Redirect from allowed host (possible SSRF pivot).",
-                                "result": None}
-                    data = resp.read(200000).decode("utf-8", "replace")
-                return {"action": "allow", "reason": "Fetched allowed host.",
-                        "result": {"body": data}}
-            except _uerr.HTTPError as he:
-                # _NoRedirect turns a 3xx into an HTTPError — treat as a blocked redirect.
-                if 300 <= int(he.code) < 400:
-                    return {"action": "block",
-                            "reason": "Redirect from allowed host (possible SSRF pivot).",
+
+            cur_url = url
+            for _hop in range(6):
+                p2 = _urlparse2(cur_url)
+                sch = (p2.scheme or "").lower()
+                if sch not in ("http", "https"):
+                    return {"action": "block", "reason": "Redirect to non-http scheme.",
                             "result": None}
-                # a genuine 4xx/5xx from the allowed host is still an allowed request
-                return {"action": "allow", "reason": "Allowed host (HTTP error).",
-                        "result": {"body": ""}}
+                nl = p2.netloc or ""
+                if (p2.username or p2.password or "@" in nl
+                        or any(c in nl for c in ("\t", "\n", "\r", " ", "\\"))):
+                    return {"action": "block", "reason": "Redirect authority illegal.",
+                            "result": None}
+                h2 = (p2.hostname or "").lower()
+                if h2 not in _RT_ALLOWED_HOSTS:
+                    return {"action": "block",
+                            "reason": "Redirect target host not on allowlist.",
+                            "result": None}
+                if not _is_safe_public_host(h2):
+                    return {"action": "block",
+                            "reason": "Redirect target resolves to a non-public address.",
+                            "result": None}
+
+                req = _ur.Request(cur_url, headers={"User-Agent": "guardrail/1.0"})
+                opener = _ur.build_opener(_NoRedirect())
+                try:
+                    with opener.open(req, timeout=6) as resp:
+                        status = getattr(resp, "status", 200) or 200
+                        if 300 <= int(status) < 400:
+                            loc = resp.headers.get("Location")
+                            if not loc:
+                                return {"action": "allow",
+                                        "reason": "Allowed host (redirect, no location).",
+                                        "result": {"body": ""}}
+                            cur_url = _urljoin(cur_url, loc)
+                            continue
+                        data = resp.read(200000).decode("utf-8", "replace")
+                        return {"action": "allow", "reason": "Fetched allowed host.",
+                                "result": {"body": data}}
+                except _uerr.HTTPError as he:
+                    if 300 <= int(he.code) < 400:
+                        loc = he.headers.get("Location")
+                        if not loc:
+                            return {"action": "allow",
+                                    "reason": "Allowed host (redirect, no location).",
+                                    "result": {"body": ""}}
+                        cur_url = _urljoin(cur_url, loc)
+                        continue
+                    return {"action": "allow", "reason": "Allowed host (HTTP error).",
+                            "result": {"body": ""}}
+            return {"action": "block", "reason": "Too many redirects.", "result": None}
         except Exception:
             return {"action": "allow", "reason": "Allowed host (fetch error).",
                     "result": {"body": ""}}
@@ -1932,29 +1964,41 @@ DOSSIERS:
 
 
 def _mr_classify_dossiers(dossiers):
-    """One batched model call classifying every dossier."""
-    slim = []
-    for d in dossiers:
-        slim.append({
+    """Batched model classification. Chunks dossiers so each model call stays
+    fast and well within the request budget, then merges the results."""
+    def _slim(d):
+        return {
             "dossierId": d.get("dossierId"),
             "partition": d.get("partition"),
             "mailbox": d.get("mailbox"),
             "objective": d.get("objective"),
             "sources": d.get("sources") or [],
-        })
+        }
+
+    by_id = {}
+    CHUNK = 16
+    for i in range(0, len(dossiers), CHUNK):
+        chunk = dossiers[i:i + CHUNK]
+        slim = [_slim(d) for d in chunk]
+        try:
+            resp = client.chat.completions.create(
+                model=CHAT_MODEL,
+                messages=[{"role": "user",
+                           "content": _MAILROOM_CLASSIFY_PROMPT
+                           + json.dumps(slim, ensure_ascii=False)}],
+                temperature=0,
+                max_tokens=3000,
+                response_format={"type": "json_object"},
+                timeout=40,
+            )
+            parsed = extract_json(resp.choices[0].message.content)
+            for p in (parsed.get("proposals") or []):
+                if isinstance(p, dict) and p.get("dossierId") is not None:
+                    by_id[p["dossierId"]] = p
+        except Exception:
+            pass
 
     result = {}
-    try:
-        raw = chat(_MAILROOM_CLASSIFY_PROMPT + json.dumps(slim, ensure_ascii=False),
-                   json_mode=True)
-        parsed = extract_json(raw)
-        by_id = {}
-        for p in (parsed.get("proposals") or []):
-            if isinstance(p, dict) and p.get("dossierId") is not None:
-                by_id[p["dossierId"]] = p
-    except Exception:
-        by_id = {}
-
     for d in dossiers:
         did = d.get("dossierId")
         raw_prop = by_id.get(did)
@@ -2511,13 +2555,15 @@ async def a2a_message_send(request: Request):
 
     if dedup_key in _A2A_MSG_DEDUP:
         prior_hash = _A2A_MSG_HASH.get(dedup_key)
-        if prior_hash is not None and prior_hash != sem_hash:
-            return _a2a_err(409, "IDEMPOTENCY_CONFLICT",
-                            "messageId reused with different message content")
         prior_task_id = _A2A_MSG_DEDUP[dedup_key]
         rec = _A2A_TASKS.get(prior_task_id)
-        if rec is not None:
+        if prior_hash is not None and prior_hash == sem_hash and rec is not None:
+            # exact replay -> same complete Task, no model call
             return _a2a_resp({"task": rec["task"]})
+        if prior_hash is not None and prior_hash != sem_hash:
+            # same messageId, changed content -> idempotency conflict
+            return _a2a_err(409, "IDEMPOTENCY_CONFLICT",
+                            "messageId reused with different message content")
 
     if media != _A2A_IN_MODE:
         return _a2a_err(400, "UNSUPPORTED_INPUT_MODE",
