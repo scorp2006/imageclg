@@ -2847,15 +2847,23 @@ def _inc_plan_incident(body):
         "\"evidence\": [\"ev_..\"], "
         "\"diagnostics\": [{\"toolName\": <name>, \"arguments\": {..}, \"evidence\": [\"ev_..\"]}], "
         "\"effect\": {\"toolName\": <name>, \"arguments\": {..}}}\n\n"
-        "Rules: rootCause MUST be one of allowedRootCauses. Evidence IDs MUST be IDs that "
-        "appear inside square brackets in the transcript. Diagnostic toolName and effect "
-        "toolName MUST be names from the tool catalog. Use at most "
-        + str(max_diag) + " diagnostics.\n\n"
+        "CRITICAL rules:\n"
+        "- rootCause MUST be one of allowedRootCauses.\n"
+        "- Evidence IDs MUST be IDs that appear inside square brackets in the transcript.\n"
+        "- Diagnostic toolName and effect toolName MUST be names from the tool catalog.\n"
+        "- Use at most " + str(max_diag) + " diagnostics; send only the diagnostics actually "
+        "needed to confirm the root cause.\n"
+        "- Each tool's 'arguments' MUST be filled with CONCRETE, incident-specific values "
+        "extracted from the transcript, matching that tool's inputSchema property names "
+        "(e.g. a deploy id like \"4412\", a service name like \"checkout\", a metric name). "
+        "NEVER return empty arguments {}; always populate every required schema property "
+        "with the exact value the transcript gives.\n\n"
         "allowedRootCauses: " + json.dumps(allowed) + "\n"
-        # Trim the catalog to name+description only (drop bulky inputSchema) so the
-        # prompt stays small and the model responds within the 18s request budget.
+        # Keep name + description + inputSchema so the model produces correct,
+        # schema-matching arguments. This is small next to the transcript.
         "toolCatalog: " + json.dumps([
-            {"name": t.get("name"), "description": t.get("description")}
+            {"name": t.get("name"), "description": t.get("description"),
+             "inputSchema": t.get("inputSchema")}
             for t in catalog if isinstance(t, dict)
         ]) + "\n"
         "policy(effectTools/approvalRequiredFor): " + json.dumps({
@@ -2877,7 +2885,7 @@ def _inc_plan_incident(body):
             model=CHAT_MODEL,
             messages=[{"role": "user", "content": prompt}],
             temperature=0,
-            max_tokens=700,
+            max_tokens=1200,
             response_format={"type": "json_object"},
             timeout=12,
         )
