@@ -1034,6 +1034,31 @@ async def community_summary(request: Request):
         return {"community_id": community_id, "summary": ""}
 
 
+# ================= GA5: Proration Calculator =================
+
+@app.post("/proration")
+async def proration(request: Request):
+    try:
+        body = await request.json()
+    except Exception:
+        return {"charge": 0}
+
+    old_price = float(body.get("old_price", 0))
+    new_price = float(body.get("new_price", 0))
+    days_remaining = float(body.get("days_remaining", 0))
+    days_in_actual_month = float(body.get("days_in_actual_month", 0) or 30)
+    spec = str(body.get("spec", "v1"))
+
+    diff = new_price - old_price
+    if spec == "v2":
+        divisor = days_in_actual_month
+    else:  # v1 (and any unknown value defaults to legacy)
+        divisor = 30
+
+    charge = diff * (days_remaining / divisor) if divisor else 0
+    return {"charge": charge}
+
+
 # ----------------- Health -----------------
 
 @app.get("/")
@@ -1045,6 +1070,7 @@ def root():
             "/invoice-intelligence", "/semantic-search", "/solve",
             "/answer-audio", "/grounded-answer", "/vector-search",
             "/extract-graph", "/graph-query", "/community-summary",
+            "/proration",
         ],
         "q4_docs_loaded": len(Q4_DOCS),
         "chat_model": CHAT_MODEL,
