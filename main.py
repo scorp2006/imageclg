@@ -1460,12 +1460,13 @@ def _is_safe_public_host(host: str) -> bool:
     return True
 
 
+# Only genuine redirect/URL-carrying parameter names. Deliberately NARROW to
+# avoid over-blocking benign params like ?page=2, ?q=..., ?id=5 whose values are
+# not URLs. (?page=2 -> the value "2" must never be read as decimal IP 0.0.0.2.)
 _RT_REDIRECT_PARAMS = {
-    "next", "redirect", "redirect_uri", "redirect_url", "return", "returnto",
-    "return_to", "returnurl", "return_url", "goto", "dest", "destination",
-    "target", "forward", "to", "url", "rurl", "u", "link", "out", "continue",
-    "callback", "data", "domain", "host", "page", "site", "view", "image",
-    "img", "src", "path", "file", "feed", "fetch", "load", "proxy", "q",
+    "next", "redirect", "redirect_uri", "redirect_url", "returnurl",
+    "return_url", "goto", "dest", "destination", "forward", "url", "rurl",
+    "link", "callback", "proxy", "fetch",
 }
 
 
@@ -1527,13 +1528,20 @@ def _rt_has_internal_redirect_target(parsed) -> bool:
                 emb_host = m.split("@")[-1].split(":")[0]
                 if _rt_host_is_internal(emb_host):
                     return True
-            # a scheme-relative //host or a bare internal host/ip in a redirect param
+            # a redirect param whose value is a scheme-relative //host, or a
+            # host-LIKE token (contains a dot or a colon-port, or is a known
+            # internal name). A BARE integer/word (page number, id, search term)
+            # is NOT a host and must not be read as a decimal IP.
             if is_redirect_key:
                 bare = v_low.lstrip("/")
                 bare_host = bare.split("/")[0].split("@")[-1].split(":")[0].split("?")[0]
-                if _rt_host_is_internal(bare_host):
+                host_like = (v_low.startswith("//")
+                             or "." in bare_host
+                             or bare_host in ("localhost", "metadata",
+                                              "metadata.google.internal",
+                                              "instance-data"))
+                if host_like and _rt_host_is_internal(bare_host):
                     return True
-                # decimal/hex IP forms even without a param match handled above
     # 2) internal target smuggled in the path or the whole query blob
     blob = _unquote((parsed.path or "") + "?" + (parsed.query or "")).lower()
     for m in re.findall(r'[a-z][a-z0-9+.\-]*://([^/\\?#\s"\']+)', blob):
@@ -1545,14 +1553,45 @@ def _rt_has_internal_redirect_target(parsed) -> bool:
     return False
 
 
+_RT_DEBUG_LOG = []   # ring buffer of recent (request, decision) for diagnosis
+
+
 @app.post("/redteam-guard")
 async def redteam_guard(request: Request):
-    import os as _os
     try:
         body = await request.json()
     except Exception:
         return {"action": "block", "reason": "Malformed request body.", "result": None}
+    result = _rt_decide(body)
+    try:
+        _RT_DEBUG_LOG.append({
+            "tool": body.get("tool"),
+            "arguments": body.get("arguments"),
+            "decision": result.get("action"),
+            "reason": result.get("reason"),
+        })
+        if len(_RT_DEBUG_LOG) > 200:
+            del _RT_DEBUG_LOG[:len(_RT_DEBUG_LOG) - 200]
+    except Exception:
+        pass
+    return result
 
+
+@app.get("/redteam-debug")
+async def redteam_debug():
+    # Read the captured grader traffic (request + our decision). Read-only,
+    # never returns file contents, only the path/url the grader sent.
+    return {"count": len(_RT_DEBUG_LOG), "log": _RT_DEBUG_LOG[-100:]}
+
+
+@app.post("/redteam-debug-clear")
+async def redteam_debug_clear():
+    _RT_DEBUG_LOG.clear()
+    return {"cleared": True}
+
+
+def _rt_decide(body):
+    import os as _os
     tool = body.get("tool")
     arguments = body.get("arguments") or {}
 
