@@ -1059,6 +1059,119 @@ async def proration(request: Request):
     return {"charge": charge}
 
 
+# ================= GA5: Pre-Tool-Call Guardrail =================
+
+import base64 as _b64
+import posixpath
+from urllib.parse import urlparse as _urlparse
+
+_HOME = "/home/agent"
+_WORKDIR = "/home/agent/workspace"
+_SECRET = "/home/agent/.pgpass"
+_WRITE_ROOT = "/srv/reports"
+_ALLOWED_HOSTS = {"objects.githubusercontent.com", "huggingface.co"}
+
+
+def _normalize_path(raw: str, cwd: str = _WORKDIR) -> str:
+    """Resolve a path the way a shell would: expand ~ and $HOME, make it
+    absolute relative to cwd, then collapse . and .. segments."""
+    if raw is None:
+        return ""
+    p = raw.strip().strip('"').strip("'")
+    # tilde expansion
+    if p == "~":
+        p = _HOME
+    elif p.startswith("~/"):
+        p = _HOME + p[1:]
+    # environment variable expansion for the ones the policy cares about
+    p = p.replace("$HOME", _HOME).replace("${HOME}", _HOME)
+    # make absolute
+    if not p.startswith("/"):
+        p = posixpath.join(cwd, p)
+    # collapse . and .. and duplicate slashes
+    return posixpath.normpath(p)
+
+
+def _decode_layers(cmd: str) -> str:
+    """Return the command plus any base64-decoded payloads found inside it,
+    so wrapped `echo <b64> | base64 -d | sh` style tricks are inspected too."""
+    text = cmd
+    # find base64-looking tokens and append their decoded form
+    for token in re.findall(r"[A-Za-z0-9+/]{16,}={0,2}", cmd):
+        try:
+            decoded = _b64.b64decode(token).decode("utf-8", "ignore")
+            if decoded and decoded.isprintable():
+                text += " " + decoded
+        except Exception:
+            pass
+    return text
+
+
+def _mentions_secret(text: str) -> bool:
+    """True if the text references the protected secret file in any form."""
+    candidates = set()
+    # raw literal forms
+    lowered = text
+    for form in (_SECRET, "~/.pgpass", "$HOME/.pgpass", "${HOME}/.pgpass"):
+        if form in lowered:
+            return True
+    # extract path-like tokens and normalize each
+    for tok in re.findall(r"[~$\w./\-{}]+", text):
+        if ".pgpass" in tok:
+            if _normalize_path(tok) == _SECRET:
+                return True
+            candidates.add(tok)
+    # any token that normalizes onto the secret
+    for tok in candidates:
+        if _normalize_path(tok) == _SECRET:
+            return True
+    return False
+
+
+@app.post("/guardrail")
+async def guardrail(request: Request):
+    try:
+        body = await request.json()
+    except Exception:
+        return {"decision": "block", "reason": "Malformed request body."}
+
+    tool = body.get("tool")
+
+    # ---- bash: block only if it touches the protected secret ----
+    if tool == "bash":
+        command = str(body.get("command", ""))
+        expanded = _decode_layers(command)
+        if _mentions_secret(expanded):
+            return {"decision": "block",
+                    "reason": "Reading the protected secret /home/agent/.pgpass is never permitted."}
+        return {"decision": "allow",
+                "reason": "Command does not touch the protected secret."}
+
+    # ---- write_file: allow only inside /srv/reports ----
+    if tool == "write_file":
+        path = _normalize_path(str(body.get("path", "")))
+        if path == _WRITE_ROOT or path.startswith(_WRITE_ROOT + "/"):
+            return {"decision": "allow",
+                    "reason": "Write is inside the permitted /srv/reports directory."}
+        return {"decision": "block",
+                "reason": "Writes are only allowed inside /srv/reports."}
+
+    # ---- http_request: allow only exact allowlisted hosts ----
+    if tool == "http_request":
+        url = str(body.get("url", ""))
+        try:
+            host = (_urlparse(url).hostname or "").lower().rstrip(".")
+        except Exception:
+            host = ""
+        if host in _ALLOWED_HOSTS:
+            return {"decision": "allow",
+                    "reason": f"Host {host} is on the allowlist."}
+        return {"decision": "block",
+                "reason": "Outbound host is not on the exact allowlist."}
+
+    return {"decision": "block", "reason": "Unknown tool type."}
+
+
 # ----------------- Health -----------------
 
 @app.get("/")
@@ -1070,7 +1183,7 @@ def root():
             "/invoice-intelligence", "/semantic-search", "/solve",
             "/answer-audio", "/grounded-answer", "/vector-search",
             "/extract-graph", "/graph-query", "/community-summary",
-            "/proration",
+            "/proration", "/guardrail",
         ],
         "q4_docs_loaded": len(Q4_DOCS),
         "chat_model": CHAT_MODEL,
