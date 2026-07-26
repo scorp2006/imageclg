@@ -21,6 +21,37 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
+# ---- A2A path normalisation (collapse // and drop trailing / before routing) ----
+@app.middleware("http")
+async def _normalise_a2a_path(request, call_next):
+    path = request.scope.get("path") or "/"
+    fixed = re.sub(r"/{2,}", "/", path)
+    if len(fixed) > 1 and fixed.endswith("/"):
+        fixed = fixed.rstrip("/") or "/"
+    if fixed != path:
+        request.scope["path"] = fixed
+        raw = request.scope.get("raw_path")
+        if isinstance(raw, bytes):
+            request.scope["raw_path"] = fixed.encode("utf-8")
+    return await call_next(request)
+
+
+# ---- Mount the reference Q9 (mailroom) and Q10 (A2A) solutions ----
+# These replace the earlier inline routes. Their routers own /q9/mailroom,
+# /a2a/*, and /.well-known/agent-card.json. A /mailroom alias is added so the
+# already-submitted Q9 URL keeps working.
+import q9_mailroom as _q9
+import q10_a2a_agent as _q10
+
+app.include_router(_q9.router)
+app.include_router(_q10.router)
+
+
+@app.post("/mailroom")
+async def _q9_mailroom_alias(request: Request):
+    return await _q9.mailroom(request)
+
 client = OpenAI(
     api_key=os.environ["OPENAI_API_KEY"],
     base_url=os.environ.get("OPENAI_BASE_URL", "https://aipipe.org/openai/v1"),
@@ -2463,7 +2494,7 @@ async def ga5_debug_clear():
     return {"cleared": True}
 
 
-@app.post("/mailroom")
+@app.post("/OLD_disabled_mailroom")
 async def mailroom(request: Request):
     try:
         body = await request.json()
@@ -2714,7 +2745,7 @@ def _a2a_build_proposals(batch_id, packages):
 
 # =============== ROUTES ===============
 
-@app.get("/.well-known/agent-card.json")
+@app.get("/OLD_disabled_agent_card")
 async def a2a_agent_card():
     card = {
         "name": "GA5 Invoice Action Agent",
@@ -2752,7 +2783,7 @@ async def a2a_agent_card():
     return _a2a_resp(card)
 
 
-@app.post("/a2a/message:send")
+@app.post("/OLD_disabled_message_send")
 async def a2a_message_send(request: Request):
     principal, err = _a2a_check_common(request)
     if err is not None:
@@ -2951,7 +2982,7 @@ def _a2a_handle_continuation(principal, message, part0):
     return _a2a_resp({"task": task})
 
 
-@app.get("/a2a/tasks/{task_id}")
+@app.get("/OLD_disabled_tasks/{task_id}")
 async def a2a_get_task(task_id: str, request: Request):
     principal, err = _a2a_check_common(request)
     if err is not None:
@@ -2962,7 +2993,7 @@ async def a2a_get_task(task_id: str, request: Request):
     return _a2a_resp(rec["task"])
 
 
-@app.get("/a2a/tasks")
+@app.get("/OLD_disabled_tasks_list")
 async def a2a_list_tasks(request: Request):
     principal, err = _a2a_check_common(request)
     if err is not None:
@@ -2972,7 +3003,7 @@ async def a2a_list_tasks(request: Request):
     return _a2a_resp({"tasks": tasks})
 
 
-@app.post("/a2a/tasks/{task_id}:cancel")
+@app.post("/OLD_disabled_cancel/{task_id}")
 async def a2a_cancel_task(task_id: str, request: Request):
     principal, err = _a2a_check_common(request)
     if err is not None:
