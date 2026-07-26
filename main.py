@@ -2806,7 +2806,12 @@ def _inc_plan_incident(body):
         "toolName MUST be names from the tool catalog. Use at most "
         + str(max_diag) + " diagnostics.\n\n"
         "allowedRootCauses: " + json.dumps(allowed) + "\n"
-        "toolCatalog: " + json.dumps(catalog) + "\n"
+        # Trim the catalog to name+description only (drop bulky inputSchema) so the
+        # prompt stays small and the model responds within the 18s request budget.
+        "toolCatalog: " + json.dumps([
+            {"name": t.get("name"), "description": t.get("description")}
+            for t in catalog if isinstance(t, dict)
+        ]) + "\n"
         "policy(effectTools/approvalRequiredFor): " + json.dumps({
             "effectTools": effect_tools,
             "approvalRequiredFor": policy.get("approvalRequiredFor", []),
@@ -2820,7 +2825,17 @@ def _inc_plan_incident(body):
     )
 
     try:
-        raw = chat(prompt, json_mode=True)
+        # Direct call with a hard timeout + capped output so a slow model can't
+        # blow the 18s per-request budget. The expected JSON is tiny.
+        resp = client.chat.completions.create(
+            model=CHAT_MODEL,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0,
+            max_tokens=700,
+            response_format={"type": "json_object"},
+            timeout=12,
+        )
+        raw = resp.choices[0].message.content
         plan = extract_json(raw)
     except Exception:
         return fallback
