@@ -2368,6 +2368,55 @@ def _mr_handle_commit(body: dict):
     }, 200)
 
 
+# ============ Shared debug capture for Q9/Q10/Q11 ============
+_GA5_DEBUG = {"mailroom": [], "a2a": [], "incident": []}
+
+
+def _ga5_dbg(bucket, entry):
+    try:
+        buf = _GA5_DEBUG.setdefault(bucket, [])
+        buf.append(entry)
+        if len(buf) > 300:
+            del buf[:len(buf) - 300]
+    except Exception:
+        pass
+
+
+def _ga5_summarize_body(body):
+    """Compact, non-sensitive summary of a request body for debugging."""
+    try:
+        if not isinstance(body, dict):
+            return {"_type": str(type(body))}
+        out = {}
+        for k, v in body.items():
+            if k == "sensitive":
+                out[k] = "[REDACTED]"
+            elif isinstance(v, list):
+                out[k] = "[list len=%d]" % len(v)
+            elif isinstance(v, dict):
+                out[k] = {kk: ("[list len=%d]" % len(vv) if isinstance(vv, list)
+                               else ("[dict]" if isinstance(vv, dict) else vv))
+                          for kk, vv in v.items()}
+            else:
+                out[k] = v
+        return out
+    except Exception as e:
+        return {"_err": str(e)}
+
+
+@app.get("/ga5-debug/{bucket}")
+async def ga5_debug(bucket: str):
+    return {"bucket": bucket, "count": len(_GA5_DEBUG.get(bucket, [])),
+            "log": _GA5_DEBUG.get(bucket, [])[-60:]}
+
+
+@app.post("/ga5-debug-clear")
+async def ga5_debug_clear():
+    for k in _GA5_DEBUG:
+        _GA5_DEBUG[k].clear()
+    return {"cleared": True}
+
+
 @app.post("/mailroom")
 async def mailroom(request: Request):
     try:
@@ -2380,10 +2429,22 @@ async def mailroom(request: Request):
 
     operation = body.get("operation")
     if operation == "propose":
-        return _mr_handle_propose(body)
-    if operation == "commit":
-        return _mr_handle_commit(body)
-    return _mr_json({"error": "invalid operation"}, 400)
+        resp = _mr_handle_propose(body)
+    elif operation == "commit":
+        resp = _mr_handle_commit(body)
+    else:
+        resp = _mr_json({"error": "invalid operation"}, 400)
+    try:
+        _ga5_dbg("mailroom", {
+            "op": operation,
+            "evaluationId": body.get("evaluationId"),
+            "n_dossiers": len(body.get("dossiers") or []) if operation == "propose" else None,
+            "n_receipts": len(body.get("receipts") or []) if operation == "commit" else None,
+            "status_code": getattr(resp, "status_code", 200),
+        })
+    except Exception:
+        pass
+    return resp
 
 
 # ================= GA5 Q10: A2A Invoice Agent (A2A 1.0 HTTP+JSON) =================
@@ -2671,6 +2732,22 @@ async def a2a_message_send(request: Request):
         return _a2a_err(400, "INVALID_MESSAGE", "parts required")
     part0 = parts[0] if isinstance(parts[0], dict) else {}
     media = part0.get("mediaType")
+
+    # capture what the grader actually sends (headers + message shape)
+    try:
+        _ga5_dbg("a2a", {
+            "event": "message:send",
+            "a2a_version": request.headers.get("a2a-version") or request.headers.get("A2A-Version"),
+            "content_type": request.headers.get("content-type"),
+            "has_auth": bool(request.headers.get("authorization")),
+            "messageId": message_id,
+            "has_taskId": bool(message.get("taskId")),
+            "mediaType": media,
+            "n_packages": len((part0.get("data") or {}).get("packages") or []),
+            "has_results": bool((part0.get("data") or {}).get("results")),
+        })
+    except Exception:
+        pass
 
     sem_hash = _a2a_sha256("msg", _a2a_canon(message).decode("utf-8"))
     dedup_key = (principal, message_id)
@@ -3309,15 +3386,29 @@ async def v2_create_incident(request: Request):
     try:
         body = await request.json()
     except Exception:
+        _ga5_dbg("incident", {"event": "create", "error": "invalid JSON", "status": 422})
         return _inc_err(422, "invalid JSON body")
     if not isinstance(body, dict):
         return _inc_err(422, "body must be an object")
 
     profile = body.get("profile")
     run_id = body.get("runId")
+
+    # capture the raw request shape the grader sends
+    _dbg = {"event": "create", "profile": profile, "runId": run_id,
+            "has_incident": isinstance(body.get("incident"), dict),
+            "n_tools": len(body.get("toolCatalog") or []),
+            "allowedRootCauses": (body.get("incident") or {}).get("allowedRootCauses"),
+            "maxDiag": (body.get("policy") or {}).get("maximumDiagnostics"),
+            "effectTools": (body.get("policy") or {}).get("effectTools"),
+            "approvalRequiredFor": (body.get("policy") or {}).get("approvalRequiredFor"),
+            "has_traceparent": bool(request.headers.get("traceparent"))}
+
     if not run_id or not isinstance(run_id, str):
+        _dbg["status"] = 422; _ga5_dbg("incident", _dbg)
         return _inc_err(422, "runId required")
     if profile != _INCIDENT_PROFILE:
+        _dbg["status"] = 400; _dbg["note"] = "profile mismatch"; _ga5_dbg("incident", _dbg)
         return _inc_err(400, "unsupported profile")
 
     fp = _inc_request_fingerprint(body)
@@ -3325,21 +3416,33 @@ async def v2_create_incident(request: Request):
     if run_id in _INCIDENT_RUNS:
         st = _INCIDENT_RUNS[run_id]
         if st.get("requestHash") != fp:
+            _dbg["status"] = 409; _ga5_dbg("incident", _dbg)
             return _inc_err(409, "runId already exists with different content")
         if st["phase"] == "waiting_diagnostics":
             dispatches = [d for d in st["actionLog"] if d.get("phase") == "diagnostic"]
+            _dbg["status"] = 200; _dbg["note"] = "replay-waiting"; _ga5_dbg("incident", _dbg)
             return _JSONResponse(_inc_waiting_diag_response(st, dispatches))
+        _dbg["status"] = 200; _dbg["note"] = "replay-final"; _ga5_dbg("incident", _dbg)
         return _JSONResponse(_inc_final_result(st))
 
     incoming_trace = _inc_parse_traceparent(request.headers.get("traceparent"))
     try:
         state, dispatches = _inc_build_initial_state(body, run_id, incoming_trace)
     except Exception as e:
+        _dbg["status"] = 422; _dbg["note"] = "planning failed: %s" % e
+        _ga5_dbg("incident", _dbg)
         return _inc_err(422, "planning failed: %s" % e)
 
     state["requestHash"] = fp
     _INCIDENT_RUNS[run_id] = state
-    return _JSONResponse(_inc_waiting_diag_response(state, dispatches))
+    resp = _inc_waiting_diag_response(state, dispatches)
+    _dbg["status"] = 200
+    _dbg["response_diagnosis"] = resp.get("diagnosis")
+    _dbg["response_n_dispatches"] = len(resp.get("dispatches") or [])
+    _dbg["response_dispatch_tools"] = [d.get("toolName") for d in (resp.get("dispatches") or [])]
+    _dbg["response_dispatch_args"] = [d.get("arguments") for d in (resp.get("dispatches") or [])]
+    _ga5_dbg("incident", _dbg)
+    return _JSONResponse(resp)
 
 
 def _inc_find_action(state, action_id, call_id):
@@ -3454,6 +3557,18 @@ async def v2_receipts(run_id: str, request: Request):
 
     outcomes = body.get("outcomes") or []
     approvals_in = body.get("approvals") or []
+
+    try:
+        _ga5_dbg("incident", {
+            "event": "receipt", "runId": run_id, "receiptId": receipt_id,
+            "phase_before": state.get("phase"),
+            "n_outcomes": len(outcomes), "n_approvals": len(approvals_in),
+            "outcome_keys": [{k: o.get(k) for k in ("actionId", "callId", "attempt", "status", "resultClass")}
+                             for o in outcomes[:5]],
+            "approval_ids": [a.get("approvalId") for a in approvals_in[:5]],
+        })
+    except Exception:
+        pass
 
     if approvals_in and state["phase"] == "waiting_approval":
         pending = state["approvals"]
