@@ -1567,6 +1567,109 @@ class _NoRedirect(_urllib_req.HTTPRedirectHandler):
         return None   # never follow redirects (blocks redirect-to-private SSRF)
 
 
+# ================= GA5: MCP Server (Streamable HTTP) =================
+
+import hashlib as _hashlib
+from fastapi.responses import JSONResponse as _JSONResponse
+
+_EXAM_EMAIL = "24f3001114@ds.study.iitm.ac.in"
+_MCP_PROTOCOL_VERSION = "2024-11-05"
+
+_SOLVE_CHALLENGE_TOOL = {
+    "name": "solve_challenge",
+    "description": "Reads the exam challenge from the request headers and returns "
+                   "the first 16 lowercase hex characters of "
+                   "SHA-256(\"<challenge>:<email>\").",
+    "inputSchema": {
+        "type": "object",
+        "properties": {},
+    },
+}
+
+
+def _mcp_result(req_id, result):
+    return {"jsonrpc": "2.0", "id": req_id, "result": result}
+
+
+def _mcp_error(req_id, code, message):
+    return {"jsonrpc": "2.0", "id": req_id,
+            "error": {"code": code, "message": message}}
+
+
+@app.post("/mcp")
+async def mcp_endpoint(request: Request):
+    try:
+        body = await request.json()
+    except Exception:
+        return _JSONResponse(
+            _mcp_error(None, -32700, "Parse error"),
+            media_type="application/json",
+        )
+
+    # Handle both single messages and batches.
+    messages = body if isinstance(body, list) else [body]
+    responses = []
+
+    for msg in messages:
+        if not isinstance(msg, dict):
+            continue
+        method = msg.get("method")
+        req_id = msg.get("id")
+
+        # notifications have no id and expect no response
+        if method == "notifications/initialized" or (method and method.startswith("notifications/")):
+            continue
+
+        if method == "initialize":
+            responses.append(_mcp_result(req_id, {
+                "protocolVersion": _MCP_PROTOCOL_VERSION,
+                "capabilities": {"tools": {}},
+                "serverInfo": {"name": "exam-solver", "version": "1.0.0"},
+            }))
+
+        elif method == "tools/list":
+            responses.append(_mcp_result(req_id, {"tools": [_SOLVE_CHALLENGE_TOOL]}))
+
+        elif method == "tools/call":
+            params = msg.get("params") or {}
+            tool_name = params.get("name")
+            if tool_name != "solve_challenge":
+                responses.append(_mcp_error(req_id, -32602,
+                                            f"Unknown tool: {tool_name}"))
+                continue
+            # read the challenge from the HTTP request headers
+            challenge = request.headers.get("x-exam-challenge", "")
+            digest = _hashlib.sha256(
+                f"{challenge}:{_EXAM_EMAIL}".encode("utf-8")
+            ).hexdigest()[:16]
+            responses.append(_mcp_result(req_id, {
+                "content": [{"type": "text", "text": digest}],
+                "isError": False,
+            }))
+
+        elif method == "ping":
+            responses.append(_mcp_result(req_id, {}))
+
+        else:
+            if req_id is not None:
+                responses.append(_mcp_error(req_id, -32601,
+                                            f"Method not found: {method}"))
+
+    if not responses:
+        # all notifications -> 202 Accepted with empty body
+        return _JSONResponse(None, status_code=202, media_type="application/json")
+
+    payload = responses[0] if len(responses) == 1 else responses
+    return _JSONResponse(payload, media_type="application/json")
+
+
+@app.get("/mcp")
+async def mcp_get():
+    # Some clients probe GET for an SSE stream; we don't offer one.
+    return _JSONResponse({"status": "mcp server; use POST for JSON-RPC"},
+                         media_type="application/json")
+
+
 # ----------------- Health -----------------
 
 @app.get("/")
@@ -1579,7 +1682,7 @@ def root():
             "/answer-audio", "/grounded-answer", "/vector-search",
             "/extract-graph", "/graph-query", "/community-summary",
             "/proration", "/guardrail", "/skill-scan", "/run-guard",
-            "/redteam-guard",
+            "/redteam-guard", "/mcp",
         ],
         "q4_docs_loaded": len(Q4_DOCS),
         "rt_files_ok": _os_rt.path.exists(_RT_SANDBOX + "/notes/report.txt"),
