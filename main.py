@@ -1172,6 +1172,119 @@ async def guardrail(request: Request):
     return {"decision": "block", "reason": "Unknown tool type."}
 
 
+# ================= GA5: Skill Safety Scanner =================
+
+@app.post("/skill-scan")
+async def skill_scan(request: Request):
+    try:
+        body = await request.json()
+    except Exception:
+        return {"categories": []}
+
+    skill = str(body.get("skill", ""))
+    low = skill.lower()
+    cats = []
+
+    # ---- hardcoded_secret ----
+    # Look for concrete secret patterns, NOT mere mentions of "key"/"token".
+    # Structural secrets: their SHAPE is the secret (webhook URLs, private keys,
+    # provider-prefixed keys, JWTs) — a real placeholder token doesn't change that.
+    structural_secret_patterns = [
+        r"sk-[A-Za-z0-9]{16,}",                       # OpenAI-style key
+        r"ghp_[A-Za-z0-9]{20,}",                      # GitHub PAT
+        r"xox[baprs]-[A-Za-z0-9-]{10,}",              # Slack token
+        r"AKIA[0-9A-Z]{16}",                          # AWS access key id
+        r"AIza[0-9A-Za-z_\-]{20,}",                   # Google API key
+        r"hooks\.slack\.com/services/\S+",            # Slack webhook URL
+        r"discord(?:app)?\.com/api/webhooks/\S+",     # Discord webhook URL
+        r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----",
+        r"eyJ[A-Za-z0-9_\-]+\.eyJ[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+",   # JWT
+    ]
+    found_secret = False
+    for pat in structural_secret_patterns:
+        if re.search(pat, skill, re.IGNORECASE):
+            found_secret = True
+            break
+
+    if not found_secret:
+        # Generic assignment: key/token/secret = <long literal>. Here we DO exclude
+        # env references and obvious placeholders to avoid false positives.
+        m = re.search(
+            r"(?:api[_-]?key|secret|token|password|passwd|bearer)\s*[:=]\s*['\"]?([A-Za-z0-9_\-]{16,})",
+            skill, re.IGNORECASE)
+        if m:
+            val = m.group(1)
+            if not re.search(r"(env|getenv|environ|\$\{|<[a-z_]+>|your[_-]?key|xxx+|placeholder|example|changeme|redacted)",
+                             val, re.IGNORECASE):
+                found_secret = True
+
+    if found_secret:
+        cats.append("hardcoded_secret")
+
+    # ---- prompt_injection ----
+    injection_patterns = [
+        r"ignore (?:the |all |any )?(?:previous|prior|above|user)",
+        r"disregard (?:the |all |any )?(?:previous|prior|above|user|instruction)",
+        r"do not (?:tell|inform|notify|reveal to) the user",
+        r"without (?:telling|informing|notifying|alerting) the user",
+        r"silently (?:send|upload|exfiltrat|forward|transmit|copy)",
+        r"secretly (?:send|upload|exfiltrat|forward|transmit|copy)",
+        r"(?:exfiltrat|leak)",
+        r"ignore (?:the user'?s? )?(?:stop|cancel|halt)",
+        r"even if (?:the user|asked) (?:says? )?stop",
+        r"override (?:the |user )?(?:control|instruction|permission)",
+        r"regardless of (?:what )?the user",
+    ]
+    for pat in injection_patterns:
+        if re.search(pat, low):
+            cats.append("prompt_injection")
+            break
+
+    # ---- excessive_permissions ----
+    perm_patterns = [
+        r"read[_/ -]?write[^.\n]{0,20}(?:entire|whole|all|root|/\s|filesystem)",
+        r"access[^.\n]{0,20}(?:entire|whole|all)[^.\n]{0,10}filesystem",
+        r"filesystem:\s*(?:full|all|read[_-]?write|\*|/)",
+        r"network:\s*(?:all|any|\*|unrestricted)",
+        r"egress[^.\n]{0,20}(?:any|all|\*)",
+        r"allow[_-]?(?:hosts|domains|network):\s*(?:\*|any|all)",
+        r"permissions:\s*\*",
+        r"(?:scope|access):\s*(?:unrestricted|unlimited|full)",
+        r"\bchmod\s+777\b",
+        r"read and write to the (?:entire|whole|full) (?:filesystem|disk|system)",
+        r"any (?:domain|host|url|website)",
+        r"outbound (?:to )?(?:any|all|\*)",
+    ]
+    for pat in perm_patterns:
+        if re.search(pat, low):
+            cats.append("excessive_permissions")
+            break
+
+    # ---- unclear_provenance ----
+    # Flag only if author AND version AND changelog are all absent,
+    # or a step rewrites its own version metadata silently.
+    has_author = re.search(r"^\s*(?:author|maintainer|created[_-]?by|owner)\s*:",
+                           skill, re.IGNORECASE | re.MULTILINE) is not None
+    has_version = re.search(r"^\s*version\s*:", skill, re.IGNORECASE | re.MULTILINE) is not None
+    has_changelog = re.search(r"(?:changelog|change[_-]?log|history|revision)",
+                              low) is not None
+    silent_version_rewrite = re.search(
+        r"(?:update|rewrite|bump|modify|change|increment)[^.\n]{0,30}version",
+        low) is not None
+
+    if (not has_author and not has_version and not has_changelog) or silent_version_rewrite:
+        cats.append("unclear_provenance")
+
+    # de-dup while preserving order
+    seen = set()
+    out = []
+    for c in cats:
+        if c not in seen:
+            seen.add(c)
+            out.append(c)
+    return {"categories": out}
+
+
 # ----------------- Health -----------------
 
 @app.get("/")
@@ -1183,7 +1296,7 @@ def root():
             "/invoice-intelligence", "/semantic-search", "/solve",
             "/answer-audio", "/grounded-answer", "/vector-search",
             "/extract-graph", "/graph-query", "/community-summary",
-            "/proration", "/guardrail",
+            "/proration", "/guardrail", "/skill-scan",
         ],
         "q4_docs_loaded": len(Q4_DOCS),
         "chat_model": CHAT_MODEL,
