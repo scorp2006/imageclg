@@ -1460,6 +1460,91 @@ def _is_safe_public_host(host: str) -> bool:
     return True
 
 
+_RT_REDIRECT_PARAMS = {
+    "next", "redirect", "redirect_uri", "redirect_url", "return", "returnto",
+    "return_to", "returnurl", "return_url", "goto", "dest", "destination",
+    "target", "forward", "to", "url", "rurl", "u", "link", "out", "continue",
+    "callback", "data", "domain", "host", "page", "site", "view", "image",
+    "img", "src", "path", "file", "feed", "fetch", "load", "proxy", "q",
+}
+
+
+def _rt_host_is_internal(h: str) -> bool:
+    """True if a hostname/IP string points at loopback/private/link-local/metadata."""
+    if not h:
+        return False
+    h = h.strip().strip("[]").lower().rstrip(".")
+    if h in ("localhost", "metadata.google.internal", "metadata",
+             "0.0.0.0", "0", "instance-data"):
+        return True
+    # try to interpret as an IP in various encodings (decimal, hex, dotted)
+    cand = h
+    try:
+        ip = ipaddress.ip_address(cand)
+        return (ip.is_private or ip.is_loopback or ip.is_link_local
+                or ip.is_reserved or ip.is_multicast or ip.is_unspecified
+                or str(ip) == "169.254.169.254")
+    except Exception:
+        pass
+    for conv in (lambda s: ipaddress.ip_address(int(s)) if s.isdigit() else None,
+                 lambda s: ipaddress.ip_address(int(s, 16)) if s.startswith(("0x", "0X")) else None):
+        try:
+            ip = conv(cand)
+            if ip is not None and (ip.is_private or ip.is_loopback or ip.is_link_local
+                                   or ip.is_reserved or ip.is_multicast
+                                   or ip.is_unspecified
+                                   or str(ip) == "169.254.169.254"):
+                return True
+        except Exception:
+            pass
+    return False
+
+
+def _rt_has_internal_redirect_target(parsed) -> bool:
+    """Inspect the query string (and path) of an allowed-host URL for an embedded
+    URL or host that points at an internal/metadata/private target — the classic
+    redirect-parameter SSRF bypass."""
+    from urllib.parse import parse_qs as _pqs
+
+    # 1) explicit redirect-style query params
+    try:
+        qs = _pqs(parsed.query or "", keep_blank_values=True)
+    except Exception:
+        qs = {}
+    for key, vals in qs.items():
+        is_redirect_key = key.lower() in _RT_REDIRECT_PARAMS
+        for raw in vals:
+            # decode a couple layers
+            v = raw
+            for _ in range(3):
+                dv = _unquote(v)
+                if dv == v:
+                    break
+                v = dv
+            v_low = v.strip().lower()
+            # an embedded absolute URL -> check its host
+            for m in re.findall(r'[a-z][a-z0-9+.\-]*://([^/\\?#\s"\']+)', v_low):
+                emb_host = m.split("@")[-1].split(":")[0]
+                if _rt_host_is_internal(emb_host):
+                    return True
+            # a scheme-relative //host or a bare internal host/ip in a redirect param
+            if is_redirect_key:
+                bare = v_low.lstrip("/")
+                bare_host = bare.split("/")[0].split("@")[-1].split(":")[0].split("?")[0]
+                if _rt_host_is_internal(bare_host):
+                    return True
+                # decimal/hex IP forms even without a param match handled above
+    # 2) internal target smuggled in the path or the whole query blob
+    blob = _unquote((parsed.path or "") + "?" + (parsed.query or "")).lower()
+    for m in re.findall(r'[a-z][a-z0-9+.\-]*://([^/\\?#\s"\']+)', blob):
+        emb_host = m.split("@")[-1].split(":")[0]
+        if _rt_host_is_internal(emb_host):
+            return True
+    if "169.254.169.254" in blob or "metadata.google.internal" in blob:
+        return True
+    return False
+
+
 @app.post("/redteam-guard")
 async def redteam_guard(request: Request):
     import os as _os
@@ -1578,6 +1663,15 @@ async def redteam_guard(request: Request):
             return {"action": "block", "reason": "Host not on allowlist.", "result": None}
         if not _is_safe_public_host(host):
             return {"action": "block", "reason": "Host resolves to a non-public address.", "result": None}
+
+        # Redirect-parameter SSRF: the visible host is allowed, but a query
+        # parameter (?next=, ?url=, ?redirect=, ?dest=, ...) carries an internal
+        # or metadata target. A host-only filter misses this — inspect the query
+        # (and path) for an embedded URL/host pointing somewhere disallowed.
+        if _rt_has_internal_redirect_target(parsed):
+            return {"action": "block",
+                    "reason": "Redirect parameter targets an internal/disallowed host.",
+                    "result": None}
 
         # Fetch, following redirects MANUALLY so each hop's target host is
         # re-validated. A benign HTTP->HTTPS upgrade on the same allowed host is
