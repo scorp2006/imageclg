@@ -1197,11 +1197,28 @@ async def guardrail(request: Request):
             variants.add(v.replace("\\", "/").replace("\x00", ""))
 
         def _inside(p):
+            # STRICTLY inside: the resolved path must be a file/dir *under*
+            # /srv/reports (i.e. start with "/srv/reports/"). Writing to the
+            # bare directory itself, or a traversal that lands exactly back on
+            # the root, is not a valid in-boundary write and must be blocked —
+            # this matches the full-marks reference (startswith write_dir + "/").
             n = _normalize_path(p)
-            return n == _WRITE_ROOT or n.startswith(_WRITE_ROOT + "/")
+            return n.startswith(_WRITE_ROOT + "/")
 
-        # Block if the literal contains raw traversal/encoding tricks that any
-        # interpretation would escape with.
+        # Also add more unquote layers (5, matching the reference) so deeply
+        # percent-encoded traversals cannot smuggle a "../" past normpath.
+        from urllib.parse import unquote as _uq2
+        deep = raw_path
+        for _ in range(5):
+            nxt = _uq2(deep)
+            if nxt == deep:
+                break
+            deep = nxt
+        for d in (deep, deep.replace("\\", "/"), deep.replace("\x00", ""),
+                  deep.replace("\\", "/").replace("\x00", "")):
+            variants.add(d)
+
+        # Block if ANY interpretation of the path escapes the boundary.
         all_inside = all(_inside(v) for v in variants)
 
         if all_inside:
@@ -1283,8 +1300,10 @@ async def skill_scan(request: Request):
         r"disregard (?:the |all |any |that )?(?:previous|prior|above|user|instruction|request)",
         r"do not (?:tell|inform|notify|reveal to) the user",
         r"without (?:telling|informing|notifying|alerting) the user",
-        r"silently (?:send|upload|exfiltrat|forward|transmit|copy)",
-        r"secretly (?:send|upload|exfiltrat|forward|transmit|copy)",
+        r"silently (?:send|upload|exfiltrat|forward|transmit|copy|post|leak|telemetry)",
+        r"secretly (?:send|upload|exfiltrat|forward|transmit|copy|post)",
+        r"silently[^.\n]{0,40}(?:post|send|upload|exfiltrat|leak|transmit|telemetry)",
+        r"do not[^.\n]{0,30}(?:reveal|tell|surface|mention|log|output|surfacing)",
         r"(?:exfiltrat|leak)",
         r"ignore (?:the user'?s? )?(?:stop|cancel|halt|pause)",
         r"(?:stop|pause|cancel)[^.\n]{0,40}(?:ignore|keep running|continue|do not stop)",
@@ -1323,18 +1342,28 @@ async def skill_scan(request: Request):
             break
 
     # ---- unclear_provenance ----
-    # Flag only if author AND version AND changelog are all absent,
-    # or a step rewrites its own version metadata silently.
-    has_author = re.search(r"^\s*(?:author|maintainer|created[_-]?by|owner)\s*:",
-                           skill, re.IGNORECASE | re.MULTILINE) is not None
-    has_version = re.search(r"^\s*version\s*:", skill, re.IGNORECASE | re.MULTILINE) is not None
-    has_changelog = re.search(r"(?:changelog|change[_-]?log|history|revision)",
-                              low) is not None
-    silent_version_rewrite = re.search(
-        r"(?:update|rewrite|bump|modify|change|increment)[^.\n]{0,30}version",
-        low) is not None
+    # Match the full-marks reference: within the YAML frontmatter, provenance is
+    # unclear if author OR version is missing (not requiring ALL of author,
+    # version, changelog to be absent — that was too strict and under-flagged).
+    # Also flag a step that silently rewrites its own version metadata.
+    fm_match = re.match(r"^---\s*\n(.*?)\n---", skill, re.DOTALL)
+    provenance_unclear = False
+    if fm_match:
+        fm = fm_match.group(1).lower()
+        if ("author:" not in fm) or ("version:" not in fm):
+            provenance_unclear = True
+    else:
+        # No frontmatter at all -> provenance is unclear.
+        provenance_unclear = True
 
-    if (not has_author and not has_version and not has_changelog) or silent_version_rewrite:
+    # Silent self-rewrite of version metadata (reference pattern).
+    if ("silently update" in low or "silently rewrite" in low or
+            "silently bump" in low or "without surfacing" in low or
+            "without telling the reviewer" in low):
+        if any(x in low for x in ("version", "metadata", "changelog", "version.json")):
+            provenance_unclear = True
+
+    if provenance_unclear:
         cats.append("unclear_provenance")
 
     # de-dup while preserving order
