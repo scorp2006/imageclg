@@ -43,9 +43,11 @@ async def _normalise_a2a_path(request, call_next):
 # already-submitted Q9 URL keeps working.
 import q9_mailroom as _q9
 import q10_a2a_agent as _q10
+import q11_incident as _q11
 
 app.include_router(_q9.router)
 app.include_router(_q10.router)
+app.include_router(_q11.router)
 
 
 @app.post("/mailroom")
@@ -3485,7 +3487,7 @@ def _inc_is_terminal(state):
     return state["phase"] in ("completed", "failed")
 
 
-@app.post("/v2/incidents")
+@app.post("/OLD_disabled_v2_incidents")
 async def v2_create_incident(request: Request):
     try:
         body = await request.json()
@@ -3636,7 +3638,7 @@ def _inc_dispatch_effect(state, effect_tool, effect_args, action_id,
     return {"status": "waiting", "dispatches": [dispatch], "approvals": []}
 
 
-@app.post("/v2/incidents/{run_id}/receipts")
+@app.post("/OLD_disabled_v2_incidents/{run_id}/receipts")
 async def v2_receipts(run_id: str, request: Request):
     if run_id not in _INCIDENT_RUNS:
         return _inc_err(404, "unknown runId")
@@ -3839,7 +3841,7 @@ def _inc_current_view(state):
     return view
 
 
-@app.get("/v2/incidents/{run_id}")
+@app.get("/OLD_disabled_v2_incidents/{run_id}")
 async def v2_get_incident(run_id: str):
     if run_id not in _INCIDENT_RUNS:
         return _inc_err(404, "unknown runId")
