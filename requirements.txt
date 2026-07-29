@@ -4,3 +4,9 @@ openai
 pydantic
 cryptography
 httpx
+pandas
+numpy
+requests
+beautifulsoup4
+openpyxl
+lxml

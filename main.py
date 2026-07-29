@@ -3847,3 +3847,32 @@ async def v2_get_incident(run_id: str):
     if _inc_is_terminal(state):
         return _JSONResponse(_inc_final_result(state))
     return _JSONResponse(_inc_current_view(state))
+
+
+# ============================================================
+# TDS Project 1 Q5 — Data-Analyst Telegram Bot (imported from bot.py)
+# Adds /health, /run.jsonl and starts the Telegram poll + keepwarm threads.
+# Isolated: does not modify any existing route above.
+# ============================================================
+try:
+    import bot as _tds_bot
+
+    @app.get("/run.jsonl")
+    def _tds_run_jsonl():
+        return _tds_bot.run_jsonl()
+
+    @app.get("/bot-health")
+    def _tds_bot_health():
+        return _tds_bot.health()
+
+    import threading as _tds_threading
+
+    @app.on_event("startup")
+    def _tds_start_bot():
+        if _tds_bot.BOT_TOKEN:
+            _tds_threading.Thread(target=_tds_bot.poll_loop, daemon=True).start()
+            _tds_threading.Thread(target=_tds_bot.keepwarm_loop, daemon=True).start()
+            _tds_bot.log_event(kind="startup", model=_tds_bot.MODEL, via="main.py")
+except Exception as _e:
+    import sys as _sys
+    print("TDS bot wiring failed:", _e, file=_sys.stderr)
