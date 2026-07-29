@@ -26,7 +26,7 @@ from openai import OpenAI
 
 # ---------------- config ----------------
 BOT_TOKEN = os.environ.get("BOT_TOKEN") or os.environ.get("TELEGRAM_BOT_TOKEN", "")
-BASE_URL = os.environ.get("BASE_URL", "").rstrip("/")  # e.g. https://xxx.onrender.com
+BASE_URL = os.environ.get("BASE_URL", "https://imageclg.onrender.com").rstrip("/")
 MODEL = os.environ.get("BOT_MODEL", "gpt-4o")
 TG_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
@@ -103,9 +103,11 @@ SYSTEM_PROMPT = """You are a precise data-analyst agent answering questions over
 
 RULES:
 1. Answer the LATEST user message. Earlier messages are context (conversations can be multi-turn).
-2. Use the run_python tool to fetch and compute answers from data — never guess a number you can compute. \
-Datasets may be public URLs (MOSPI publishes CSV/XLSX/HTML tables), inline in the message, or referenced by name. \
-For well-known published statistics where downloading fails, answer from reliable knowledge.
+2. Use the run_python tool to fetch and compute answers when the data is given inline or as a REAL, specific URL. \
+Never invent or guess a URL (e.g. example.com) — if you do not have a real dataset URL, do NOT call the tool with a fake one. \
+For well-known published statistics (MOSPI, census, national indicators, etc.), you may answer directly from your own reliable knowledge. \
+You MUST always give a concrete best-answer. NEVER reply with "data not available", "unknown", "N/A", or an empty/placeholder answer — \
+if a download fails or no data is provided, fall back to your best knowledge and answer decisively.
 3. Your FINAL message must be ONLY the exact JSON object the question asks for — no prose, no markdown fences, no explanation. \
 The question specifies the exact shape of "answer" (keys, nesting, string vs number) — match it EXACTLY, add no extra keys.
 4. Every question wants a JSON like {"answer": <shaped as asked>, "log_url": "PLACEHOLDER"}. \
