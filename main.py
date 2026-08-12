@@ -44,10 +44,12 @@ async def _normalise_a2a_path(request, call_next):
 import q9_mailroom as _q9
 import q10_a2a_agent as _q10
 import q11_incident as _q11
+import ga7_release_gate as _ga7
 
 app.include_router(_q9.router)
 app.include_router(_q10.router)
 app.include_router(_q11.router)
+app.include_router(_ga7.router)
 
 
 @app.post("/mailroom")

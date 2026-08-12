@@ -1,0 +1,23 @@
+name: TDS GA7 Release Gate
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+jobs:
+  release-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: "TDS identity: 24f3001114@ds.study.iitm.ac.in"
+        run: echo "TDS GA7 Release Gate — 24f3001114@ds.study.iitm.ac.in"
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Test release-gate policy
+        run: python test_ga7_gate.py
