@@ -45,11 +45,17 @@ import q9_mailroom as _q9
 import q10_a2a_agent as _q10
 import q11_incident as _q11
 import ga7_release_gate as _ga7
+import action_firewall as _firewall
+import terraform_gate as _tfgate
+import output_gate as _outgate
 
 app.include_router(_q9.router)
 app.include_router(_q10.router)
 app.include_router(_q11.router)
 app.include_router(_ga7.router)
+app.include_router(_firewall.router)
+app.include_router(_tfgate.router)
+app.include_router(_outgate.router)
 
 
 @app.post("/mailroom")

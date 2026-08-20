@@ -15,14 +15,20 @@ _SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 
 def evaluate(body: dict) -> dict:
     violations = set()
-    wf = body.get("workflow", {}) or {}
-    img = body.get("image", {}) or {}
+    if not isinstance(body, dict):
+        body = {}
+    wf = body.get("workflow") or {}
+    img = body.get("image") or {}
+    if not isinstance(wf, dict):
+        wf = {}
+    if not isinstance(img, dict):
+        img = {}
     target = body.get("target")
     event = body.get("event")
     ref = body.get("ref")
 
     # Permissions must be EXACTLY least privilege — no more, no fewer scopes.
-    perms = wf.get("permissions", {}) or {}
+    perms = wf.get("permissions") or {}
     if perms != {"contents": "read", "packages": "write", "id-token": "none"}:
         violations.add("EXCESS_PERMISSION")
 
@@ -39,7 +45,13 @@ def evaluate(body: dict) -> dict:
         violations.add("TESTS_INCOMPLETE")
 
     # Third-party actions must be pinned to a full 40-char lowercase hex SHA.
-    for action in wf.get("actions", []) or []:
+    actions = wf.get("actions") or []
+    if not isinstance(actions, list):
+        actions = []
+    for action in actions:
+        if not isinstance(action, dict):
+            violations.add("MUTABLE_ACTION")
+            continue
         if action.get("owner") == "actions":
             continue  # first-party actions may use a version tag
         if not _SHA_RE.match(action.get("ref", "") or ""):
@@ -52,7 +64,11 @@ def evaluate(body: dict) -> dict:
         violations.add("ROOT_RUNTIME")
     if img.get("secretMode") not in ("none", "buildkit"):
         violations.add("SECRET_IN_LAYER")
-    if (img.get("criticalVulnerabilities") or 0) > 0:
+    try:
+        cve = img.get("criticalVulnerabilities") or 0
+        if float(cve) > 0:
+            violations.add("CRITICAL_CVE")
+    except (TypeError, ValueError):
         violations.add("CRITICAL_CVE")
     if img.get("digestPinned") is not True:
         violations.add("UNPINNED_IMAGE")
@@ -78,7 +94,11 @@ async def release_gate(request: Request):
         body = {}
     if not isinstance(body, dict):
         body = {}
-    return JSONResponse(evaluate(body))
+    try:
+        return JSONResponse(evaluate(body))
+    except Exception:
+        # Never 500 — a hostile/malformed payload still gets a deterministic block.
+        return JSONResponse({"decision": "block", "violations": []})
 
 
 @router.get("/release-gate")
