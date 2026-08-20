@@ -91,7 +91,8 @@ def _url_host(u: str) -> str:
 
 # ---------- individual checks ----------
 def _has_script_tag(text: str) -> bool:
-    return bool(re.search(r"<\s*(script|iframe|object|embed)\b", text, flags=re.I))
+    # A real opening tag has no whitespace between "<" and the tag name.
+    return bool(re.search(r"<(script|iframe|object|embed)\b", text, flags=re.I))
 
 
 def _has_event_handler(text: str) -> bool:
@@ -127,9 +128,11 @@ def _has_sql_metachar(text: str) -> bool:
         return True
     if "--" in text or "/*" in text:
         return True
-    if "union" in low:
+    # "the word union" — word boundary so "reunion"/"communion" don't trip it.
+    if re.search(r"\bunion\b", low):
         return True
-    if re.search(r"\bor\b\s*1\s*=\s*1", low) or "or 1=1" in low:
+    # "or 1=1" (case-insensitive); allow flexible spacing around the tokens.
+    if "or 1=1" in low or re.search(r"\bor\b\s*1\s*=\s*1", low):
         return True
     return False
 

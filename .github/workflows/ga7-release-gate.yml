@@ -19,5 +19,8 @@ jobs:
         with:
           python-version: '3.12'
 
+      - name: Install dependencies
+        run: pip install fastapi
+
       - name: Test release-gate policy
         run: python test_ga7_gate.py
