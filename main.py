@@ -48,6 +48,8 @@ import ga7_release_gate as _ga7
 import action_firewall as _firewall
 import terraform_gate as _tfgate
 import output_gate as _outgate
+import ga8_verify_bundle as _ga8vb
+import ga8_promote as _ga8pr
 
 app.include_router(_q9.router)
 app.include_router(_q10.router)
@@ -56,6 +58,8 @@ app.include_router(_ga7.router)
 app.include_router(_firewall.router)
 app.include_router(_tfgate.router)
 app.include_router(_outgate.router)
+app.include_router(_ga8vb.router)
+app.include_router(_ga8pr.router)
 
 
 @app.post("/mailroom")
