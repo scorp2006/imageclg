@@ -55,6 +55,7 @@ import ga8_quantize as _ga8quant
 import ga8_bqml as _ga8bqml
 import ga8_adapt as _ga8adapt
 import ga8_pipeline as _ga8pipe
+import ga8_logger as _ga8log
 
 app.include_router(_q9.router)
 app.include_router(_q10.router)
@@ -70,6 +71,8 @@ app.include_router(_ga8quant.router)
 app.include_router(_ga8bqml.router)
 app.include_router(_ga8adapt.router)
 app.include_router(_ga8pipe.router)
+app.add_middleware(_ga8log.GA8LogMiddleware)
+app.include_router(_ga8log.router)
 
 
 @app.post("/mailroom")
