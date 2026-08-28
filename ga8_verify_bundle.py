@@ -61,76 +61,70 @@ def evaluate(body):
     if not policy_ok:
         violations.add("INVALID_POLICY")
 
-    # files must be str->str
-    files_ok = all(isinstance(k, str) and isinstance(v, str) for k, v in files.items())
+    required_set = set(REQUIRED_FILES)
 
-    # ---- required files present ----
+    # ---- required files present & are UTF-8 strings ----
     for name in REQUIRED_FILES:
-        if name not in files or not isinstance(files.get(name), str):
+        if name not in files:
             violations.add(f"MISSING_FILE:{name}")
+        elif not isinstance(files.get(name), str):
+            violations.add(f"INVALID_FILE:{name}")
 
-    # ---- unsafe weight extensions / extra files handled with inventory ----
+    # ---- extra files (beyond the 6 required) are invalid; weight exts are unsafe ----
     for name in files:
+        if not isinstance(name, str):
+            continue
         low = name.lower()
         if low.endswith(UNSAFE_EXTS):
             violations.add("UNSAFE_WEIGHTS")
+        if name not in required_set:
+            violations.add(f"INVALID_FILE:{name}")
 
     # ---- inventory recomputation ----
-    inventory_digest = None
-    # Build recomputed inventory of every file EXCEPT inventory.json
+    # Recompute over every file present EXCEPT inventory.json, sorted by UTF-8 filename.
     inv_items = []
-    for name in sorted(files.keys(), key=lambda s: _utf8(s)):
-        if name == "inventory.json":
-            continue
+    for name in sorted((n for n in files if n != "inventory.json"), key=lambda s: _utf8(s)):
         content = files[name]
         if not isinstance(content, str):
             continue
         b = _utf8(content)
         inv_items.append({"name": name, "bytes": len(b), "sha256": _sha256_hex(b)})
-    recomputed = [{"name": it["name"], "bytes": it["bytes"], "sha256": it["sha256"]} for it in inv_items]
-    recomputed_json = json.dumps(recomputed, separators=(",", ":"), ensure_ascii=False)
+    recomputed_json = json.dumps(inv_items, separators=(",", ":"), ensure_ascii=False)
     inventory_digest = _sha256_hex(_utf8(recomputed_json))
 
     # parse supplied inventory.json
     if "inventory.json" in files and isinstance(files["inventory.json"], str):
         try:
             supplied_inv = json.loads(files["inventory.json"])
-            if not isinstance(supplied_inv, list):
-                violations.add("INVALID_JSON:inventory.json")
-                supplied_inv = None
         except Exception:
-            violations.add("INVALID_JSON:inventory.json")
             supplied_inv = None
-        if supplied_inv is not None:
-            # compare against recomputed; also detect untracked/extra files
-            supplied_names = set()
-            valid_entries = True
-            for e in supplied_inv:
-                if not (isinstance(e, dict) and list(e.keys()) == ["name", "bytes", "sha256"]):
-                    valid_entries = False
-                    break
-                supplied_names.add(e.get("name"))
-            if not valid_entries:
+            violations.add("INVALID_JSON:inventory.json")
+        else:
+            if not isinstance(supplied_inv, list):
                 violations.add("INVENTORY_MISMATCH")
-            else:
-                # UNTRACKED_FILE: a file present in bundle (except inventory.json) not listed
-                actual_names = set(n for n in files if n != "inventory.json")
-                if supplied_names != actual_names:
-                    # files in bundle not tracked -> UNTRACKED_FILE; mismatch of content -> INVENTORY_MISMATCH
-                    if actual_names - supplied_names:
-                        violations.add("UNTRACKED_FILE")
-                    if supplied_names - actual_names:
-                        violations.add("INVENTORY_MISMATCH")
-                # exact recompute equality
-                if json.dumps(supplied_inv, separators=(",", ":"), ensure_ascii=False) != recomputed_json:
-                    violations.add("INVENTORY_MISMATCH")
+                supplied_inv = None
+        if supplied_inv is not None:
+            # Every entry must have exact key order name,bytes,sha256.
+            entries_wellformed = all(
+                isinstance(e, dict) and list(e.keys()) == ["name", "bytes", "sha256"]
+                for e in supplied_inv
+            )
+            actual_names = set(n for n in files if n != "inventory.json")
+            supplied_names = set(e.get("name") for e in supplied_inv if isinstance(e, dict))
+            # UNTRACKED_FILE: a bundle file (not inventory.json) missing from the listing.
+            if actual_names - supplied_names:
+                violations.add("UNTRACKED_FILE")
+            # Exact-serialization equality is the integrity check.
+            if not entries_wellformed or \
+                    json.dumps(supplied_inv, separators=(",", ":"), ensure_ascii=False) != recomputed_json:
+                violations.add("INVENTORY_MISMATCH")
 
     # ---- adapter_config.json ----
     if "adapter_config.json" in files and isinstance(files["adapter_config.json"], str):
         try:
             ac = json.loads(files["adapter_config.json"])
             if not isinstance(ac, dict):
-                violations.add("INVALID_JSON:adapter_config.json")
+                violations.add("INVALID_ADAPTER_CONFIG")
                 ac = None
         except Exception:
             violations.add("INVALID_JSON:adapter_config.json")
@@ -150,7 +144,7 @@ def evaluate(body):
         try:
             manifest = json.loads(files["training_manifest.json"])
             if not isinstance(manifest, dict):
-                violations.add("INVALID_JSON:training_manifest.json")
+                violations.add("INVALID_TRAINING_MANIFEST")
                 manifest = None
         except Exception:
             violations.add("INVALID_JSON:training_manifest.json")
@@ -169,7 +163,7 @@ def evaluate(body):
         try:
             evaluation = json.loads(files["evaluation.json"])
             if not isinstance(evaluation, dict):
-                violations.add("INVALID_JSON:evaluation.json")
+                violations.add("INVALID_EVALUATION")
                 evaluation = None
         except Exception:
             violations.add("INVALID_JSON:evaluation.json")

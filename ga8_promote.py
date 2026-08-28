@@ -188,7 +188,7 @@ def evaluate(body):
         "action": action,
         "championVersion": champ,
         "selectedVersion": selected,
-        "eligibleVersions": sorted(eligible, key=lambda v: int(v)),
+        "eligibleVersions": ranked,  # ranked order: acc desc, latency asc, size asc, version asc
         "failedGates": failed_out,
         "aliasMutation": alias_mutation,
         "evidence": evidence,
