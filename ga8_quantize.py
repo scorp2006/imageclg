@@ -41,10 +41,28 @@ def evaluate_freeze(body):
 
     allowed = allowed if isinstance(allowed, list) else []
     allowed_set = set(a for a in allowed if _is_ne_str(a))
+
+    # Global freeze-level validation failures mark EVERY candidate INVALID_INPUT.
+    names = [c.get("name") for c in candidates if isinstance(c, dict)]
+    global_invalid = False
+    if len(names) != len(candidates):
+        global_invalid = True  # a candidate is not a dict
+    if len(names) != len(set(names)):
+        global_invalid = True  # duplicate candidate names
+    if not all(_is_ne_str(n) for n in names):
+        global_invalid = True  # non-string / empty name
+    if not (isinstance(allowed, list) and all(_is_ne_str(a) for a in allowed)
+            and len(allowed) == len(set(allowed))):
+        global_invalid = True  # duplicate / bad allowed reasons
+    if not (_is_ne_str(cal) and _is_ne_str(tok)):
+        global_invalid = True  # digests must be non-empty strings
+
     out_candidates = []
     for c in candidates:
         codes = set()
-        name = c.get("name")
+        if global_invalid:
+            codes.add("INVALID_INPUT")
+        name = c.get("name") if isinstance(c, dict) else None
         files = c.get("files")
         files_valid = isinstance(files, dict) and len(files) > 0 \
             and all(_is_ne_str(k) for k in files.keys()) \
@@ -84,7 +102,9 @@ def evaluate_freeze(body):
                 codes.add("TOKENIZER_MISMATCH")
 
         # Determine status.
-        if allowed_unsupported:
+        if global_invalid:
+            status = "invalid"
+        elif allowed_unsupported:
             status = "unsupported"
         elif not codes:
             status = "frozen"
@@ -170,7 +190,8 @@ def evaluate_select(body):
                 manifest_valid = False
 
         is_frozen = (c.get("status") == "frozen")
-        if not manifest_valid:
+        # INVALID_MANIFEST when the inventory is missing/empty/corrupt.
+        if not manifest_valid or (isinstance(inv, list) and len(inv) == 0):
             rcodes.add("INVALID_MANIFEST")
 
         # predictions
@@ -208,17 +229,19 @@ def evaluate_select(body):
             rcodes.add("INVALID_POLICY")
         if not lineage_valid or not names_match:
             rcodes.add("INVALID_LINEAGE")
-        if stored is None:
+        # NOT_FROZEN is per-candidate: this candidate's status is not "frozen".
+        if not is_frozen:
             rcodes.add("NOT_FROZEN")
 
-        if preds_valid and policy_valid:
-            if agg is not None and agg < agg_floor:
-                rcodes.add("AGGREGATE_FLOOR")
-            for sname, floor in (req_slices.items() if isinstance(req_slices, dict) else []):
+        # slice checks: required slices must be present (even if predictions invalid) + floors.
+        if isinstance(req_slices, dict):
+            for sname, floor in req_slices.items():
                 if sname not in slice_acc:
                     rcodes.add(f"MISSING_SLICE:{sname}")
-                elif slice_acc[sname] < floor:
+                elif isinstance(floor, (int, float)) and slice_acc[sname] < floor:
                     rcodes.add(f"SLICE_FLOOR:{sname}")
+        if preds_valid and policy_valid and agg is not None and agg < agg_floor:
+            rcodes.add("AGGREGATE_FLOOR")
         if policy_valid and recomputed_total is not None and recomputed_total > max_bytes:
             rcodes.add("SIZE_LIMIT")
         if policy_valid and lat_valid and lat > max_lat:
@@ -228,10 +251,19 @@ def evaluate_select(body):
                     and lineage_valid and names_match and stored is not None
                     and not rcodes)
 
+        # slices output: required slices (from policy) with computed value or null, sorted by name.
+        if preds_valid:
+            slice_keys = set(slice_acc.keys())
+            if isinstance(req_slices, dict):
+                slice_keys |= set(req_slices.keys())
+            slices_out = {k: slice_acc.get(k) for k in sorted(slice_keys, key=lambda s: _utf8(s))}
+        else:
+            slices_out = {}
+
         results.append({
             "name": name,
             "aggregate": agg,
-            "slices": slice_acc if preds_valid else {},
+            "slices": slices_out,
             "totalBytes": recomputed_total if manifest_valid else None,
             "latencyMs": lat if lat_valid else None,
             "admitted": admitted,
