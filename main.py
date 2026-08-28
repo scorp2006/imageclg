@@ -52,6 +52,9 @@ import ga8_verify_bundle as _ga8vb
 import ga8_promote as _ga8pr
 import ga8_corpus as _ga8corpus
 import ga8_quantize as _ga8quant
+import ga8_bqml as _ga8bqml
+import ga8_adapt as _ga8adapt
+import ga8_pipeline as _ga8pipe
 
 app.include_router(_q9.router)
 app.include_router(_q10.router)
@@ -64,6 +67,9 @@ app.include_router(_ga8vb.router)
 app.include_router(_ga8pr.router)
 app.include_router(_ga8corpus.router)
 app.include_router(_ga8quant.router)
+app.include_router(_ga8bqml.router)
+app.include_router(_ga8adapt.router)
+app.include_router(_ga8pipe.router)
 
 
 @app.post("/mailroom")

@@ -32,22 +32,15 @@ def evaluate_freeze(body):
     allowed = body.get("allowedUnsupportedReasons")
     candidates = body.get("candidates")
 
-    # validation -> HTTP 400 (return special marker)
+    # HTTP 400 only for: bad freezeId, an empty/non-array candidate list. Everything else
+    # is handled per-candidate (invalid status) so a single bad candidate never 400s the batch.
     if not (_is_ne_str(freeze_id) and len(freeze_id) <= 128):
-        return ("400", None)
-    if not _is_ne_str(cal) or not _is_ne_str(tok):
-        return ("400", None)
-    if not isinstance(allowed, list) or not all(_is_ne_str(a) for a in allowed) \
-            or len(set(allowed)) != len(allowed):
         return ("400", None)
     if not isinstance(candidates, list) or len(candidates) == 0:
         return ("400", None)
-    names = [c.get("name") for c in candidates if isinstance(c, dict)]
-    if len(names) != len(candidates) or not all(_is_ne_str(n) for n in names) \
-            or len(set(names)) != len(names):
-        return ("400", None)
 
-    allowed_set = set(allowed)
+    allowed = allowed if isinstance(allowed, list) else []
+    allowed_set = set(a for a in allowed if _is_ne_str(a))
     out_candidates = []
     for c in candidates:
         codes = set()
