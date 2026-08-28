@@ -20,7 +20,7 @@ GA8_PATHS = {
     "/quantize", "/pipeline", "/verify-bundle",
 }
 
-_LOG = deque(maxlen=400)  # ring buffer of dicts
+_LOG = deque(maxlen=2000)  # ring buffer of dicts
 
 
 class GA8LogMiddleware(BaseHTTPMiddleware):
@@ -67,7 +67,7 @@ class GA8LogMiddleware(BaseHTTPMiddleware):
 
 
 @router.get("/ga8-logs")
-async def ga8_logs(path: str = None, limit: int = 200):
+async def ga8_logs(path: str = None, limit: int = 2000):
     items = list(_LOG)
     if path:
         items = [e for e in items if e.get("path") == path]
